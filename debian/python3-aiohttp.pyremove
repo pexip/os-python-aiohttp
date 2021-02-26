@@ -1,0 +1,6 @@
+*/*.c
+*/*.h
+*/*.pyd
+*/*.pyi
+*/*.pyx
+aiohttp/.hash
