@@ -2,7 +2,7 @@
 Async http client/server framework
 ==================================
 
-.. image:: https://raw.githubusercontent.com/aio-libs/aiohttp/master/docs/_static/aiohttp-icon-128x128.png
+.. image:: https://raw.githubusercontent.com/aio-libs/aiohttp/master/docs/aiohttp-plain.svg
    :height: 64px
    :width: 64px
    :alt: aiohttp logo
@@ -67,8 +67,7 @@ To get something from the web:
               html = await response.text()
               print("Body:", html[:15], "...")
 
-  loop = asyncio.get_event_loop()
-  loop.run_until_complete(main())
+    asyncio.run(main())
 
 This prints:
 
@@ -161,17 +160,19 @@ Requirements
 - Python >= 3.6
 - async-timeout_
 - attrs_
-- chardet_
+- charset-normalizer_
 - multidict_
 - yarl_
+- frozenlist_
 
 Optionally you may install the cChardet_ and aiodns_ libraries (highly
 recommended for sake of speed).
 
-.. _chardet: https://pypi.python.org/pypi/chardet
+.. _charset-normalizer: https://pypi.org/project/charset-normalizer
 .. _aiodns: https://pypi.python.org/pypi/aiodns
 .. _attrs: https://github.com/python-attrs/attrs
 .. _multidict: https://pypi.python.org/pypi/multidict
+.. _frozenlist: https://pypi.org/project/frozenlist/
 .. _yarl: https://pypi.python.org/pypi/yarl
 .. _async-timeout: https://pypi.python.org/pypi/async_timeout
 .. _cChardet: https://pypi.python.org/pypi/cchardet

@@ -1,10 +1,11 @@
 import asyncio
 import contextlib
 import gc
+import io
 import json
 import sys
 from http.cookies import SimpleCookie
-from io import BytesIO
+from typing import Any, List
 from unittest import mock
 
 import pytest
@@ -30,7 +31,7 @@ def connector(loop):
     proto = mock.Mock()
     conn._conns["a"] = [(proto, 123)]
     yield conn
-    conn.close()
+    loop.run_until_complete(conn.close())
 
 
 @pytest.fixture
@@ -292,7 +293,7 @@ async def test_connector(create_session, loop, mocker) -> None:
 
     await session.close()
     assert connector.close.called
-    connector.close()
+    await connector.close()
 
 
 async def test_create_connector(create_session, loop, mocker) -> None:
@@ -314,7 +315,6 @@ def test_connector_loop(loop) -> None:
 
         connector = another_loop.run_until_complete(make_connector())
 
-        stack.enter_context(contextlib.closing(connector))
         with pytest.raises(RuntimeError) as ctx:
 
             async def make_sess():
@@ -325,9 +325,13 @@ def test_connector_loop(loop) -> None:
             Matches("Session and connector has to use same event loop")
             == str(ctx.value).strip()
         )
+        another_loop.run_until_complete(connector.close())
+
+        # Cannot use `AsyncExitStack` as it's Python 3.7+:
+        another_loop.run_until_complete(connector.close())
 
 
-def test_detach(session) -> None:
+def test_detach(loop, session) -> None:
     conn = session.connector
     try:
         assert not conn.closed
@@ -336,7 +340,7 @@ def test_detach(session) -> None:
         assert session.closed
         assert not conn.closed
     finally:
-        conn.close()
+        loop.run_until_complete(conn.close())
 
 
 async def test_request_closed_session(session) -> None:
@@ -345,10 +349,10 @@ async def test_request_closed_session(session) -> None:
         await session.request("get", "/")
 
 
-def test_close_flag_for_closed_connector(session) -> None:
+def test_close_flag_for_closed_connector(loop, session) -> None:
     conn = session.connector
     assert not session.closed
-    conn.close()
+    loop.run_until_complete(conn.close())
     assert session.closed
 
 
@@ -398,7 +402,7 @@ async def test_del_debug(connector, loop) -> None:
     assert logs[0] == expected
 
 
-async def test_context_manager(connector, loop) -> None:
+async def test_session_context_manager(connector, loop) -> None:
     with pytest.raises(TypeError):
         with ClientSession(loop=loop, connector=connector) as session:
             pass
@@ -514,6 +518,7 @@ async def test_cookie_jar_usage(loop, aiohttp_client) -> None:
 async def test_session_default_version(loop) -> None:
     session = aiohttp.ClientSession(loop=loop)
     assert session.version == aiohttp.HttpVersion11
+    await session.close()
 
 
 async def test_session_loop(loop) -> None:
@@ -548,53 +553,174 @@ async def test_request_tracing(loop, aiohttp_client) -> None:
     trace_config_ctx = mock.Mock()
     trace_request_ctx = {}
     body = "This is request body"
-    gathered_req_body = BytesIO()
-    gathered_res_body = BytesIO()
+    gathered_req_headers = CIMultiDict()
     on_request_start = mock.Mock(side_effect=make_mocked_coro(mock.Mock()))
     on_request_redirect = mock.Mock(side_effect=make_mocked_coro(mock.Mock()))
     on_request_end = mock.Mock(side_effect=make_mocked_coro(mock.Mock()))
 
-    async def on_request_chunk_sent(session, context, params):
-        gathered_req_body.write(params.chunk)
+    with io.BytesIO() as gathered_req_body, io.BytesIO() as gathered_res_body:
 
-    async def on_response_chunk_received(session, context, params):
-        gathered_res_body.write(params.chunk)
+        async def on_request_chunk_sent(session, context, params):
+            gathered_req_body.write(params.chunk)
+
+        async def on_response_chunk_received(session, context, params):
+            gathered_res_body.write(params.chunk)
+
+        async def on_request_headers_sent(session, context, params):
+            gathered_req_headers.extend(**params.headers)
+
+        trace_config = aiohttp.TraceConfig(
+            trace_config_ctx_factory=mock.Mock(return_value=trace_config_ctx)
+        )
+        trace_config.on_request_start.append(on_request_start)
+        trace_config.on_request_end.append(on_request_end)
+        trace_config.on_request_chunk_sent.append(on_request_chunk_sent)
+        trace_config.on_response_chunk_received.append(on_response_chunk_received)
+        trace_config.on_request_redirect.append(on_request_redirect)
+        trace_config.on_request_headers_sent.append(on_request_headers_sent)
+
+        headers = CIMultiDict({"Custom-Header": "Custom value"})
+        session = await aiohttp_client(
+            app, trace_configs=[trace_config], headers=headers
+        )
+
+        async with session.post(
+            "/", data=body, trace_request_ctx=trace_request_ctx
+        ) as resp:
+
+            await resp.json()
+
+            on_request_start.assert_called_once_with(
+                session.session,
+                trace_config_ctx,
+                aiohttp.TraceRequestStartParams(
+                    hdrs.METH_POST, session.make_url("/"), headers
+                ),
+            )
+
+            on_request_end.assert_called_once_with(
+                session.session,
+                trace_config_ctx,
+                aiohttp.TraceRequestEndParams(
+                    hdrs.METH_POST, session.make_url("/"), headers, resp
+                ),
+            )
+            assert not on_request_redirect.called
+            assert gathered_req_body.getvalue() == body.encode("utf8")
+            assert gathered_res_body.getvalue() == json.dumps({"ok": True}).encode(
+                "utf8"
+            )
+            assert gathered_req_headers["Custom-Header"] == "Custom value"
+
+
+async def test_request_tracing_url_params(loop: Any, aiohttp_client: Any) -> None:
+    async def root_handler(request):
+        return web.Response()
+
+    async def redirect_handler(request):
+        raise web.HTTPFound("/")
+
+    app = web.Application()
+    app.router.add_get("/", root_handler)
+    app.router.add_get("/redirect", redirect_handler)
+
+    mocks = [mock.Mock(side_effect=make_mocked_coro(mock.Mock())) for _ in range(7)]
+    (
+        on_request_start,
+        on_request_redirect,
+        on_request_end,
+        on_request_exception,
+        on_request_chunk_sent,
+        on_response_chunk_received,
+        on_request_headers_sent,
+    ) = mocks
 
     trace_config = aiohttp.TraceConfig(
-        trace_config_ctx_factory=mock.Mock(return_value=trace_config_ctx)
+        trace_config_ctx_factory=mock.Mock(return_value=mock.Mock())
     )
     trace_config.on_request_start.append(on_request_start)
+    trace_config.on_request_redirect.append(on_request_redirect)
     trace_config.on_request_end.append(on_request_end)
+    trace_config.on_request_exception.append(on_request_exception)
     trace_config.on_request_chunk_sent.append(on_request_chunk_sent)
     trace_config.on_response_chunk_received.append(on_response_chunk_received)
-    trace_config.on_request_redirect.append(on_request_redirect)
+    trace_config.on_request_headers_sent.append(on_request_headers_sent)
 
     session = await aiohttp_client(app, trace_configs=[trace_config])
 
-    async with session.post(
-        "/", data=body, trace_request_ctx=trace_request_ctx
-    ) as resp:
+    def reset_mocks() -> None:
+        for m in mocks:
+            m.reset_mock()
 
-        await resp.json()
+    def to_trace_urls(mock_func: mock.Mock) -> List[URL]:
+        return [call_args[0][-1].url for call_args in mock_func.call_args_list]
 
-        on_request_start.assert_called_once_with(
-            session.session,
-            trace_config_ctx,
-            aiohttp.TraceRequestStartParams(
-                hdrs.METH_POST, session.make_url("/"), CIMultiDict()
-            ),
-        )
+    def to_url(path: str) -> URL:
+        return session.make_url(path)
 
-        on_request_end.assert_called_once_with(
-            session.session,
-            trace_config_ctx,
-            aiohttp.TraceRequestEndParams(
-                hdrs.METH_POST, session.make_url("/"), CIMultiDict(), resp
-            ),
-        )
-        assert not on_request_redirect.called
-        assert gathered_req_body.getvalue() == body.encode("utf8")
-        assert gathered_res_body.getvalue() == json.dumps({"ok": True}).encode("utf8")
+    # Standard
+    for req in [
+        lambda: session.get("/?x=0"),
+        lambda: session.get("/", params=dict(x=0)),
+    ]:
+        reset_mocks()
+        async with req() as resp:
+            await resp.text()
+            assert to_trace_urls(on_request_start) == [to_url("/?x=0")]
+            assert to_trace_urls(on_request_redirect) == []
+            assert to_trace_urls(on_request_end) == [to_url("/?x=0")]
+            assert to_trace_urls(on_request_exception) == []
+            assert to_trace_urls(on_request_chunk_sent) == [to_url("/?x=0")]
+            assert to_trace_urls(on_response_chunk_received) == [to_url("/?x=0")]
+            assert to_trace_urls(on_request_headers_sent) == [to_url("/?x=0")]
+
+    # Redirect
+    for req in [
+        lambda: session.get("/redirect?x=0"),
+        lambda: session.get("/redirect", params=dict(x=0)),
+    ]:
+        reset_mocks()
+        async with req() as resp:
+            await resp.text()
+            assert to_trace_urls(on_request_start) == [to_url("/redirect?x=0")]
+            assert to_trace_urls(on_request_redirect) == [to_url("/redirect?x=0")]
+            assert to_trace_urls(on_request_end) == [to_url("/")]
+            assert to_trace_urls(on_request_exception) == []
+            assert to_trace_urls(on_request_chunk_sent) == [
+                to_url("/redirect?x=0"),
+                to_url("/"),
+            ]
+            assert to_trace_urls(on_response_chunk_received) == [to_url("/")]
+            assert to_trace_urls(on_request_headers_sent) == [
+                to_url("/redirect?x=0"),
+                to_url("/"),
+            ]
+
+    # Exception
+    with mock.patch("aiohttp.client.TCPConnector.connect") as connect_patched:
+        error = Exception()
+        if sys.version_info >= (3, 8, 1):
+            connect_patched.side_effect = error
+        else:
+            loop = asyncio.get_event_loop()
+            f = loop.create_future()
+            f.set_exception(error)
+            connect_patched.return_value = f
+
+        for req in [
+            lambda: session.get("/?x=0"),
+            lambda: session.get("/", params=dict(x=0)),
+        ]:
+            reset_mocks()
+            with contextlib.suppress(Exception):
+                await req()
+            assert to_trace_urls(on_request_start) == [to_url("/?x=0")]
+            assert to_trace_urls(on_request_redirect) == []
+            assert to_trace_urls(on_request_end) == []
+            assert to_trace_urls(on_request_exception) == [to_url("?x=0")]
+            assert to_trace_urls(on_request_chunk_sent) == []
+            assert to_trace_urls(on_response_chunk_received) == []
+            assert to_trace_urls(on_request_headers_sent) == []
 
 
 async def test_request_tracing_exception() -> None:
@@ -631,6 +757,8 @@ async def test_request_tracing_exception() -> None:
             ),
         )
         assert not on_request_end.called
+
+    await session.close()
 
 
 async def test_request_tracing_interpose_headers(loop, aiohttp_client) -> None:
@@ -674,6 +802,7 @@ async def test_client_session_custom_attr(loop) -> None:
     session = ClientSession(loop=loop)
     with pytest.warns(DeprecationWarning):
         session.custom = None
+    await session.close()
 
 
 async def test_client_session_timeout_args(loop) -> None:
@@ -694,25 +823,41 @@ async def test_client_session_timeout_args(loop) -> None:
             loop=loop, timeout=client.ClientTimeout(total=10 * 60), conn_timeout=30 * 60
         )
 
+    await session1.close()
+    await session2.close()
+
 
 async def test_client_session_timeout_default_args(loop) -> None:
     session1 = ClientSession()
     assert session1.timeout == client.DEFAULT_TIMEOUT
+    await session1.close()
 
 
 async def test_client_session_timeout_argument() -> None:
     session = ClientSession(timeout=500)
     assert session.timeout == 500
+    await session.close()
+
+
+async def test_client_session_timeout_zero() -> None:
+    timeout = client.ClientTimeout(total=10, connect=0, sock_connect=0, sock_read=0)
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            await session.get("http://example.com")
+    except asyncio.TimeoutError:
+        pytest.fail("0 should disable timeout.")
 
 
 async def test_requote_redirect_url_default() -> None:
     session = ClientSession()
     assert session.requote_redirect_url
+    await session.close()
 
 
 async def test_requote_redirect_url_default_disable() -> None:
     session = ClientSession(requote_redirect_url=False)
     assert not session.requote_redirect_url
+    await session.close()
 
 
 async def test_requote_redirect_setter() -> None:
@@ -721,3 +866,40 @@ async def test_requote_redirect_setter() -> None:
     with pytest.warns(DeprecationWarning):
         session.requote_redirect_url = False
     assert not session.requote_redirect_url
+    await session.close()
+
+
+@pytest.mark.parametrize(
+    ("base_url", "url", "expected_url"),
+    [
+        pytest.param(
+            None,
+            "http://example.com/test",
+            URL("http://example.com/test"),
+            id="base_url=None url='http://example.com/test'",
+        ),
+        pytest.param(
+            None,
+            URL("http://example.com/test"),
+            URL("http://example.com/test"),
+            id="base_url=None url=URL('http://example.com/test')",
+        ),
+        pytest.param(
+            "http://example.com",
+            "/test",
+            URL("http://example.com/test"),
+            id="base_url='http://example.com' url='/test'",
+        ),
+        pytest.param(
+            URL("http://example.com"),
+            "/test",
+            URL("http://example.com/test"),
+            id="base_url=URL('http://example.com') url='/test'",
+        ),
+    ],
+)
+async def test_build_url_returns_expected_url(
+    create_session, base_url, url, expected_url
+) -> None:
+    session = await create_session(base_url)
+    assert session._build_url(url) == expected_url

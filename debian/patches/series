@@ -1,3 +1,4 @@
 0002-Use-local-install-of-jquery.patch
 0002-Add-shebang-to-examples.patch
 0003-remove-forkme-button-from-docs-to-prevent-privacy-br.patch
+0004-remove-sphinxcontrib.towncrier-for-now.patch

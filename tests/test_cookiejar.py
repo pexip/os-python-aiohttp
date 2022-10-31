@@ -25,7 +25,7 @@ def cookies_to_send():
         "different-domain-cookie=sixth; Domain=different.org; "
         "secure-cookie=seventh; Domain=secure.com; Secure; "
         "no-path-cookie=eighth; Domain=pathtest.com; "
-        "path1-cookie=nineth; Domain=pathtest.com; Path=/; "
+        "path1-cookie=ninth; Domain=pathtest.com; Path=/; "
         "path2-cookie=tenth; Domain=pathtest.com; Path=/one; "
         "path3-cookie=eleventh; Domain=pathtest.com; Path=/one/two; "
         "path4-cookie=twelfth; Domain=pathtest.com; Path=/one/two/; "
@@ -51,7 +51,7 @@ def cookies_to_send_with_expired():
         "different-domain-cookie=sixth; Domain=different.org; "
         "secure-cookie=seventh; Domain=secure.com; Secure; "
         "no-path-cookie=eighth; Domain=pathtest.com; "
-        "path1-cookie=nineth; Domain=pathtest.com; Path=/; "
+        "path1-cookie=ninth; Domain=pathtest.com; Path=/; "
         "path2-cookie=tenth; Domain=pathtest.com; Path=/one; "
         "path3-cookie=eleventh; Domain=pathtest.com; Path=/one/two; "
         "path4-cookie=twelfth; Domain=pathtest.com; Path=/one/two/; "
@@ -77,7 +77,7 @@ def cookies_to_receive():
         "different-domain-cookie=sixth; Domain=different.org; Path=/; "
         "no-path-cookie=seventh; Domain=pathtest.com; "
         "path-cookie=eighth; Domain=pathtest.com; Path=/somepath; "
-        "wrong-path-cookie=nineth; Domain=pathtest.com; Path=somepath;"
+        "wrong-path-cookie=ninth; Domain=pathtest.com; Path=somepath;"
     )
 
 
@@ -244,7 +244,7 @@ async def test_domain_filter_ip_cookie_send(loop) -> None:
         "different-domain-cookie=sixth; Domain=different.org; "
         "secure-cookie=seventh; Domain=secure.com; Secure; "
         "no-path-cookie=eighth; Domain=pathtest.com; "
-        "path1-cookie=nineth; Domain=pathtest.com; Path=/; "
+        "path1-cookie=ninth; Domain=pathtest.com; Path=/; "
         "path2-cookie=tenth; Domain=pathtest.com; Path=/one; "
         "path3-cookie=eleventh; Domain=pathtest.com; Path=/one/two; "
         "path4-cookie=twelfth; Domain=pathtest.com; Path=/one/two/; "
@@ -354,7 +354,7 @@ class TestCookieJarSafe(TestCookieJarBase):
             "different-domain-cookie=sixth; Domain=different.org; "
             "secure-cookie=seventh; Domain=secure.com; Secure; "
             "no-path-cookie=eighth; Domain=pathtest.com; "
-            "path1-cookie=nineth; Domain=pathtest.com; Path=/; "
+            "path1-cookie=ninth; Domain=pathtest.com; Path=/; "
             "path2-cookie=tenth; Domain=pathtest.com; Path=/one; "
             "path3-cookie=eleventh; Domain=pathtest.com; Path=/one/two; "
             "path4-cookie=twelfth; Domain=pathtest.com; Path=/one/two/; "
@@ -377,7 +377,7 @@ class TestCookieJarSafe(TestCookieJarBase):
             "different-domain-cookie=sixth; Domain=different.org; Path=/; "
             "no-path-cookie=seventh; Domain=pathtest.com; "
             "path-cookie=eighth; Domain=pathtest.com; Path=/somepath; "
-            "wrong-path-cookie=nineth; Domain=pathtest.com; Path=somepath;"
+            "wrong-path-cookie=ninth; Domain=pathtest.com; Path=somepath;"
         )
 
         async def make_jar():
@@ -694,3 +694,80 @@ async def test_loose_cookies_types() -> None:
 
     for loose_cookies_type in accepted_types:
         jar.update_cookies(cookies=loose_cookies_type)
+
+
+async def test_cookie_jar_clear_all():
+    sut = CookieJar()
+    cookie = SimpleCookie()
+    cookie["foo"] = "bar"
+    sut.update_cookies(cookie)
+
+    sut.clear()
+    assert len(sut) == 0
+
+
+async def test_cookie_jar_clear_expired():
+    sut = CookieJar()
+
+    cookie = SimpleCookie()
+
+    cookie["foo"] = "bar"
+    cookie["foo"]["expires"] = "Tue, 1 Jan 1990 12:00:00 GMT"
+
+    with freeze_time("1980-01-01"):
+        sut.update_cookies(cookie)
+
+    sut.clear(lambda x: False)
+    with freeze_time("1980-01-01"):
+        assert len(sut) == 0
+
+
+async def test_cookie_jar_clear_domain():
+    sut = CookieJar()
+    cookie = SimpleCookie()
+    cookie["foo"] = "bar"
+    cookie["domain_cookie"] = "value"
+    cookie["domain_cookie"]["domain"] = "example.com"
+    cookie["subdomain_cookie"] = "value"
+    cookie["subdomain_cookie"]["domain"] = "test.example.com"
+    sut.update_cookies(cookie)
+
+    sut.clear_domain("example.com")
+    iterator = iter(sut)
+    morsel = next(iterator)
+    assert morsel.key == "foo"
+    assert morsel.value == "bar"
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/index.html",
+        URL("http://127.0.0.1/index.html"),
+        ["http://127.0.0.1/index.html"],
+        [URL("http://127.0.0.1/index.html")],
+    ],
+)
+async def test_treat_as_secure_origin_init(url) -> None:
+    jar = CookieJar(unsafe=True, treat_as_secure_origin=url)
+    assert jar._treat_as_secure_origin == [URL("http://127.0.0.1")]
+
+
+async def test_treat_as_secure_origin() -> None:
+    endpoint = URL("http://127.0.0.1/")
+
+    jar = CookieJar(unsafe=True, treat_as_secure_origin=[endpoint])
+    secure_cookie = SimpleCookie(
+        "cookie-key=cookie-value; HttpOnly; Path=/; Secure",
+    )
+
+    jar.update_cookies(
+        secure_cookie,
+        endpoint,
+    )
+
+    assert len(jar) == 1
+    filtered_cookies = jar.filter_cookies(request_url=endpoint)
+    assert len(filtered_cookies) == 1
