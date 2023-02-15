@@ -7,7 +7,7 @@ Streaming API
 
 
 ``aiohttp`` uses streams for retrieving *BODIES*:
-:attr:`aiohttp.web.Request.content` and
+:attr:`aiohttp.web.BaseRequest.content` and
 :attr:`aiohttp.ClientResponse.content` are properties with stream API.
 
 
@@ -16,7 +16,7 @@ Streaming API
    The reader from incoming stream.
 
    User should never instantiate streams manually but use existing
-   :attr:`aiohttp.web.Request.content` and
+   :attr:`aiohttp.web.BaseRequest.content` and
    :attr:`aiohttp.ClientResponse.content` properties for accessing raw
    BODY data.
 
@@ -70,6 +70,19 @@ Reading Methods
 
    :return bytes: the given line
 
+.. comethod:: StreamReader.readuntil(separator="\n")
+
+   Read until separator, where `separator` is a sequence of bytes.
+
+   If EOF is received, and `separator` was not found, the method will
+   return the partial read bytes.
+
+   If the EOF was received and the internal buffer is empty, return an
+   empty bytes object.
+
+   .. versionadded:: 3.8
+
+   :return bytes: the given data
 
 .. comethod:: StreamReader.readchunk()
 

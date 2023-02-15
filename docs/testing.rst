@@ -1,9 +1,9 @@
+.. module:: aiohttp.test_utils
+
 .. _aiohttp-testing:
 
 Testing
 =======
-
-.. currentmodule:: aiohttp.test_utils
 
 Testing aiohttp web servers
 ---------------------------
@@ -57,7 +57,7 @@ requests to this server.
 
 :class:`~aiohttp.test_utils.TestServer` runs :class:`aiohttp.web.Application`
 based server, :class:`~aiohttp.test_utils.RawTestServer` starts
-:class:`aiohttp.web.WebServer` low level server.
+:class:`aiohttp.web.Server` low level server.
 
 For performing HTTP requests to these servers you have to create a
 test client: :class:`~aiohttp.test_utils.TestClient` instance.
@@ -243,7 +243,7 @@ Unittest
 To test applications with the standard library's unittest or unittest-based
 functionality, the AioHTTPTestCase is provided::
 
-    from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
+    from aiohttp.test_utils import AioHTTPTestCase
     from aiohttp import web
 
     class MyAppTestCase(AioHTTPTestCase):
@@ -259,26 +259,11 @@ functionality, the AioHTTPTestCase is provided::
             app.router.add_get('/', hello)
             return app
 
-        # the unittest_run_loop decorator can be used in tandem with
-        # the AioHTTPTestCase to simplify running
-        # tests that are asynchronous
-        @unittest_run_loop
         async def test_example(self):
-            resp = await self.client.request("GET", "/")
-            assert resp.status == 200
-            text = await resp.text()
-            assert "Hello, world" in text
-
-        # a vanilla example
-        def test_example_vanilla(self):
-            async def test_get_route():
-                url = "/"
-                resp = await self.client.request("GET", url)
-                assert resp.status == 200
+            async with self.client.request("GET", "/") as resp:
+                self.assertEqual(resp.status, 200)
                 text = await resp.text()
-                assert "Hello, world" in text
-
-            self.loop.run_until_complete(test_get_route())
+            self.assertIn("Hello, world", text)
 
 .. class:: AioHTTPTestCase
 
@@ -306,7 +291,7 @@ functionality, the AioHTTPTestCase is provided::
 
     .. attribute:: app
 
-       The application returned by :meth:`get_app`
+       The application returned by :meth:`~aiohttp.test_utils.AioHTTPTestCase.get_application`
        (:class:`aiohttp.web.Application` instance).
 
     .. comethod:: get_client()
@@ -337,17 +322,33 @@ functionality, the AioHTTPTestCase is provided::
 
     .. comethod:: setUpAsync()
 
-       This async method do nothing by default and can be overridden to execute
-       asynchronous code during the ``setUp`` stage of the ``TestCase``.
+       This async method can be overridden to execute asynchronous code during
+       the ``setUp`` stage of the ``TestCase``::
+
+           async def setUpAsync(self):
+               await super().setUpAsync()
+               await foo()
 
        .. versionadded:: 2.3
+
+       .. versionchanged:: 3.8
+
+          ``await super().setUpAsync()`` call is required.
 
     .. comethod:: tearDownAsync()
 
-       This async method do nothing by default and can be overridden to execute
-       asynchronous code during the ``tearDown`` stage of the ``TestCase``.
+       This async method can be overridden to execute asynchronous code during
+       the ``tearDown`` stage of the ``TestCase``::
+
+           async def tearDownAsync(self):
+               await super().tearDownAsync()
+               await foo()
 
        .. versionadded:: 2.3
+
+       .. versionchanged:: 3.8
+
+          ``await super().tearDownAsync()`` call is required.
 
     .. method:: setUp()
 
@@ -361,16 +362,13 @@ functionality, the AioHTTPTestCase is provided::
    .. note::
 
       The ``TestClient``'s methods are asynchronous: you have to
-      execute function on the test client using asynchronous methods.
-
-      A basic test class wraps every test method by
-      :func:`unittest_run_loop` decorator::
+      execute functions on the test client using asynchronous methods.::
 
          class TestA(AioHTTPTestCase):
 
-             @unittest_run_loop
              async def test_f(self):
-                 resp = await self.client.get('/')
+                 async with self.client.get('/') as resp:
+                     body = await resp.text()
 
 
 .. decorator:: unittest_run_loop:
@@ -380,6 +378,10 @@ functionality, the AioHTTPTestCase is provided::
 
    Handles executing an asynchronous function, using
    the :attr:`AioHTTPTestCase.loop` of the :class:`AioHTTPTestCase`.
+
+   .. deprecated:: 3.8
+       In 3.8+ :class:`AioHTTPTestCase` inherits from :class:`unittest.IsolatedAsyncioTestCase`
+       making this decorator unneeded. It is now a no-op.
 
 
 Faking request object
@@ -460,7 +462,7 @@ conditions that hard to reproduce on real server::
    :type writer: aiohttp.StreamWriter
 
    :param transport: asyncio transport instance
-   :type transport: asyncio.transports.Transport
+   :type transport: asyncio.Transport
 
    :param payload: raw payload reader object
    :type  payload: aiohttp.StreamReader
@@ -527,7 +529,7 @@ basis, the TestClient object can be used directly::
 
 
 A full list of the utilities provided can be found at the
-:data:`api reference <aiohttp.test_utils>`
+:mod:`api reference <aiohttp.test_utils>`
 
 
 Testing API Reference
@@ -539,15 +541,15 @@ Test server
 Runs given :class:`aiohttp.web.Application` instance on random TCP port.
 
 After creation the server is not started yet, use
-:meth:`~aiohttp.test_utils.TestServer.start_server` for actual server
-starting and :meth:`~aiohttp.test_utils.TestServer.close` for
+:meth:`~aiohttp.test_utils.BaseTestServer.start_server` for actual server
+starting and :meth:`~aiohttp.test_utils.BaseTestServer.close` for
 stopping/cleanup.
 
 Test server usually works in conjunction with
 :class:`aiohttp.test_utils.TestClient` which provides handy client methods
 for accessing to the server.
 
-.. class:: BaseTestServer(*, scheme='http', host='127.0.0.1', port=None)
+.. class:: BaseTestServer(*, scheme='http', host='127.0.0.1', port=None, socket_factory=get_port_socket)
 
    Base class for test servers.
 
@@ -560,6 +562,13 @@ for accessing to the server.
       random unused port is used.
 
       .. versionadded:: 3.0
+
+   :param collections.abc.Callable[[str,int,socket.AddressFamily],socket.socket] socket_factory: optional
+                          Factory to create a socket for the server.
+                          By default creates a TCP socket and binds it
+                          to ``host`` and ``port``.
+
+      .. versionadded:: 3.8
 
    .. attribute:: scheme
 
@@ -576,11 +585,17 @@ for accessing to the server.
 
    .. attribute:: handler
 
-      :class:`aiohttp.web.WebServer` used for HTTP requests serving.
+      :class:`aiohttp.web.Server` used for HTTP requests serving.
 
    .. attribute:: server
 
       :class:`asyncio.AbstractServer` used for managing accepted connections.
+
+   .. attribute:: socket_factory
+
+      *socket_factory* used to create and bind a server socket.
+
+      .. versionadded:: 3.8
 
    .. comethod:: start_server(loop=None, **kwargs)
 
@@ -663,7 +678,8 @@ Test Client
                          first with ``TestServer(app)``.
 
    :param cookie_jar: an optional :class:`aiohttp.CookieJar` instance,
-                      may be useful with ``CookieJar(unsafe=True)``
+                      may be useful with
+                      ``CookieJar(unsafe=True, treat_as_secure_origin="http://127.0.0.1")``
                       option.
 
    :param str scheme: HTTP scheme, non-protected ``"http"`` by default.
@@ -693,7 +709,7 @@ Test Client
 
    .. attribute:: app
 
-      An alias for :attr:`self.server.app`. return ``None`` if
+      An alias for ``self.server.app``. return ``None`` if
       ``self.server`` is not :class:`TestServer`
       instance(e.g. :class:`RawTestServer` instance for test low-level server).
 

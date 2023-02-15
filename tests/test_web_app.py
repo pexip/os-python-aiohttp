@@ -1,13 +1,14 @@
 import asyncio
+import gc
 from unittest import mock
 
 import pytest
-from async_generator import async_generator, yield_
 
 from aiohttp import log, web
 from aiohttp.abc import AbstractAccessLogger, AbstractRouter
-from aiohttp.helpers import DEBUG, PY_36
+from aiohttp.helpers import DEBUG, PY_36, PY_310
 from aiohttp.test_utils import make_mocked_coro
+from aiohttp.typedefs import Handler
 
 
 async def test_app_ctor() -> None:
@@ -38,14 +39,28 @@ async def test_set_loop() -> None:
         assert app.loop is loop
 
 
+@pytest.mark.xfail(
+    PY_310,
+    reason="No idea why _set_loop() is constructed out of loop "
+    "but it calls `asyncio.get_event_loop()`",
+    raises=DeprecationWarning,
+)
 def test_set_loop_default_loop() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     app = web.Application()
-    app._set_loop(None)
-    with pytest.warns(DeprecationWarning):
-        assert app.loop is loop
-    asyncio.set_event_loop(None)
+    try:
+        app._set_loop(None)
+        with pytest.warns(DeprecationWarning):
+            assert app.loop is loop
+        asyncio.set_event_loop(None)
+
+    finally:
+        # Cleanup, leaks into `test_app_make_handler_debug_exc[True]` otherwise:
+        loop.stop()
+        loop.run_forever()
+        loop.close()
+        gc.collect()
 
 
 def test_set_loop_with_different_loops() -> None:
@@ -57,6 +72,12 @@ def test_set_loop_with_different_loops() -> None:
 
     with pytest.raises(RuntimeError):
         app._set_loop(loop=object())
+
+    # Cleanup, leaks into `test_app_make_handler_debug_exc[True]` otherwise:
+    loop.stop()
+    loop.run_forever()
+    loop.close()
+    gc.collect()
 
 
 @pytest.mark.parametrize("debug", [True, False])
@@ -261,7 +282,7 @@ def test_app_run_middlewares() -> None:
     assert root._run_middlewares is False
 
     @web.middleware
-    async def middleware(request, handler):
+    async def middleware(request, handler: Handler):
         return await handler(request)
 
     root = web.Application(middlewares=[middleware])
@@ -306,10 +327,9 @@ async def test_cleanup_ctx() -> None:
     out = []
 
     def f(num):
-        @async_generator
         async def inner(app):
             out.append("pre_" + str(num))
-            await yield_(None)
+            yield None
             out.append("post_" + str(num))
 
         return inner
@@ -330,12 +350,11 @@ async def test_cleanup_ctx_exception_on_startup() -> None:
     exc = Exception("fail")
 
     def f(num, fail=False):
-        @async_generator
         async def inner(app):
             out.append("pre_" + str(num))
             if fail:
                 raise exc
-            await yield_(None)
+            yield None
             out.append("post_" + str(num))
 
         return inner
@@ -359,10 +378,9 @@ async def test_cleanup_ctx_exception_on_cleanup() -> None:
     exc = Exception("fail")
 
     def f(num, fail=False):
-        @async_generator
         async def inner(app):
             out.append("pre_" + str(num))
-            await yield_(None)
+            yield None
             out.append("post_" + str(num))
             if fail:
                 raise exc
@@ -381,15 +399,40 @@ async def test_cleanup_ctx_exception_on_cleanup() -> None:
     assert out == ["pre_1", "pre_2", "pre_3", "post_3", "post_2", "post_1"]
 
 
+async def test_cleanup_ctx_cleanup_after_exception() -> None:
+    app = web.Application()
+    ctx_state = None
+
+    async def success_ctx(app):
+        nonlocal ctx_state
+        ctx_state = "START"
+        yield
+        ctx_state = "CLEAN"
+
+    async def fail_ctx(app):
+        raise Exception()
+        yield
+
+    app.cleanup_ctx.append(success_ctx)
+    app.cleanup_ctx.append(fail_ctx)
+    runner = web.AppRunner(app)
+    try:
+        with pytest.raises(Exception):
+            await runner.setup()
+    finally:
+        await runner.cleanup()
+
+    assert ctx_state == "CLEAN"
+
+
 async def test_cleanup_ctx_exception_on_cleanup_multiple() -> None:
     app = web.Application()
     out = []
 
     def f(num, fail=False):
-        @async_generator
         async def inner(app):
             out.append("pre_" + str(num))
-            await yield_(None)
+            yield None
             out.append("post_" + str(num))
             if fail:
                 raise Exception("fail_" + str(num))
@@ -416,12 +459,11 @@ async def test_cleanup_ctx_multiple_yields() -> None:
     out = []
 
     def f(num):
-        @async_generator
         async def inner(app):
             out.append("pre_" + str(num))
-            await yield_(None)
+            yield None
             out.append("post_" + str(num))
-            await yield_(None)
+            yield None
 
         return inner
 
@@ -505,12 +547,11 @@ async def test_subapp_on_startup(aiohttp_client) -> None:
     ctx_pre_called = False
     ctx_post_called = False
 
-    @async_generator
     async def cleanup_ctx(app):
         nonlocal ctx_pre_called, ctx_post_called
         ctx_pre_called = True
         app["cleanup"] = True
-        await yield_(None)
+        yield None
         ctx_post_called = True
 
     subapp.cleanup_ctx.append(cleanup_ctx)

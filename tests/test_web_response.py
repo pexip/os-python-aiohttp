@@ -5,11 +5,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
+import aiosignal
 import pytest
 from multidict import CIMultiDict, CIMultiDictProxy
 from re_assert import Matches
 
-from aiohttp import HttpVersion, HttpVersion10, HttpVersion11, hdrs, signals
+from aiohttp import HttpVersion, HttpVersion10, HttpVersion11, hdrs
+from aiohttp.helpers import ETag
+from aiohttp.http_writer import _serialize_headers
 from aiohttp.payload import BytesPayload
 from aiohttp.test_utils import make_mocked_coro, make_mocked_request
 from aiohttp.web import ContentCoding, Response, StreamResponse, json_response
@@ -21,12 +24,12 @@ def make_request(
     headers=CIMultiDict(),
     version=HttpVersion11,
     on_response_prepare=None,
-    **kwargs
+    **kwargs,
 ):
     app = kwargs.pop("app", None) or mock.Mock()
     app._debug = False
     if on_response_prepare is None:
-        on_response_prepare = signals.Signal(app)
+        on_response_prepare = aiosignal.Signal(app)
     app.on_response_prepare = on_response_prepare
     app.on_response_prepare.freeze()
     protocol = kwargs.pop("protocol", None) or mock.Mock()
@@ -54,12 +57,7 @@ def writer(buf):
         buf.extend(chunk)
 
     async def write_headers(status_line, headers):
-        headers = (
-            status_line
-            + "\r\n"
-            + "".join([k + ": " + v + "\r\n" for k, v in headers.items()])
-        )
-        headers = headers.encode("utf-8") + b"\r\n"
+        headers = _serialize_headers(status_line, headers)
         buf.extend(headers)
 
     async def write_eof(chunk=b""):
@@ -251,6 +249,95 @@ def test_last_modified_reset() -> None:
     resp.last_modified = 0
     resp.last_modified = None
     assert resp.last_modified is None
+
+
+@pytest.mark.parametrize(
+    ["header_val", "expected"],
+    [
+        pytest.param("xxyyzz", None),
+        pytest.param("Tue, 08 Oct 4446413 00:56:40 GMT", None),
+        pytest.param("Tue, 08 Oct 2000 00:56:80 GMT", None),
+    ],
+)
+def test_last_modified_string_invalid(header_val, expected) -> None:
+    resp = StreamResponse(headers={"Last-Modified": header_val})
+    assert resp.last_modified == expected
+
+
+def test_etag_initial() -> None:
+    resp = StreamResponse()
+    assert resp.etag is None
+
+
+def test_etag_string() -> None:
+    resp = StreamResponse()
+    value = "0123-kotik"
+    resp.etag = value
+    assert resp.etag == ETag(value=value)
+    assert resp.headers[hdrs.ETAG] == f'"{value}"'
+
+
+@pytest.mark.parametrize(
+    ["etag", "expected_header"],
+    (
+        (ETag(value="0123-weak-kotik", is_weak=True), 'W/"0123-weak-kotik"'),
+        (ETag(value="0123-strong-kotik", is_weak=False), '"0123-strong-kotik"'),
+    ),
+)
+def test_etag_class(etag, expected_header) -> None:
+    resp = StreamResponse()
+    resp.etag = etag
+    assert resp.etag == etag
+    assert resp.headers[hdrs.ETAG] == expected_header
+
+
+def test_etag_any() -> None:
+    resp = StreamResponse()
+    resp.etag = "*"
+    assert resp.etag == ETag(value="*")
+    assert resp.headers[hdrs.ETAG] == "*"
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    (
+        '"invalid"',
+        "повинен бути ascii",
+        ETag(value='"invalid"', is_weak=True),
+        ETag(value="bad ©®"),
+    ),
+)
+def test_etag_invalid_value_set(invalid_value) -> None:
+    resp = StreamResponse()
+    with pytest.raises(ValueError, match="is not a valid etag"):
+        resp.etag = invalid_value
+
+
+@pytest.mark.parametrize(
+    "header",
+    (
+        "forgotten quotes",
+        '"∀ x ∉ ascii"',
+    ),
+)
+def test_etag_invalid_value_get(header) -> None:
+    resp = StreamResponse()
+    resp.headers["ETag"] = header
+    assert resp.etag is None
+
+
+@pytest.mark.parametrize("invalid", (123, ETag(value=123, is_weak=True)))
+def test_etag_invalid_value_class(invalid) -> None:
+    resp = StreamResponse()
+    with pytest.raises(ValueError, match="Unsupported etag type"):
+        resp.etag = invalid
+
+
+def test_etag_reset() -> None:
+    resp = StreamResponse()
+    resp.etag = "*"
+    resp.etag = None
+    assert resp.etag is None
 
 
 async def test_start() -> None:
@@ -820,7 +907,7 @@ async def test_prepare_twice() -> None:
 async def test_prepare_calls_signal() -> None:
     app = mock.Mock()
     sig = make_mocked_coro()
-    on_response_prepare = signals.Signal(app)
+    on_response_prepare = aiosignal.Signal(app)
     on_response_prepare.append(sig)
     req = make_request("GET", "/", app=app, on_response_prepare=on_response_prepare)
     resp = StreamResponse()
@@ -1184,7 +1271,7 @@ async def test_response_prepared_after_header_preparation() -> None:
             del res.headers["Server"]
 
     app = mock.Mock()
-    sig = signals.Signal(app)
+    sig = aiosignal.Signal(app)
     sig.append(_strip_server)
 
     req = make_request("GET", "/", on_response_prepare=sig, app=app)

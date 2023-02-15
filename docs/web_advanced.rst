@@ -240,6 +240,13 @@ Data Sharing aka No Singletons Please
 :mod:`aiohttp.web` discourages the use of *global variables*, aka *singletons*.
 Every variable should have its own context that is *not global*.
 
+Global variables are generally considered bad practice due to the complexity
+they add in keeping track of state changes to variables.
+
+*aiohttp* does not use globals by design, which will reduce the number of bugs
+and/or unexpected behaviors for its users. For example, an i18n translated string
+being written for one request and then being served to another.
+
 So, :class:`Application` and :class:`Request`
 support a :class:`collections.abc.MutableMapping` interface (i.e. they are
 dict-like objects), allowing them to be used as data stores.
@@ -272,6 +279,10 @@ For this please use :attr:`Request.config_dict` read-only property::
     async def handler(request):
         data = request.config_dict['my_private_key']
 
+The app object can be used in this way to reuse a database connection or anything
+else needed throughout the application.
+
+See this reference section for more detail: :ref:`aiohttp-web-app-and-router`.
 
 Request's storage
 ^^^^^^^^^^^^^^^^^
@@ -431,7 +442,7 @@ the keyword-only ``middlewares`` parameter::
 
 Internally, a single :ref:`request handler <aiohttp-web-handler>` is constructed
 by applying the middleware chain to the original handler in reverse order,
-and is called by the :class:`RequestHandler` as a regular *handler*.
+and is called by the :class:`~aiohttp.web.RequestHandler` as a regular *handler*.
 
 Since *middlewares* are themselves coroutines, they may perform extra
 ``await`` calls when creating a new handler, e.g. call database etc.
@@ -615,10 +626,6 @@ one ``yield``.
 *aiohttp* guarantees that *cleanup code* is called if and only if
 *startup code* was successfully finished.
 
-Asynchronous generators are supported by Python 3.6+, on Python 3.5
-please use `async_generator <https://pypi.org/project/async_generator/>`_
-library.
-
 .. versionadded:: 3.1
 
 .. _aiohttp-web-nested-applications:
@@ -748,7 +755,7 @@ header::
 Custom resource implementation
 ------------------------------
 
-To register custom resource use :meth:`UrlDispatcher.register_resource`.
+To register custom resource use :meth:`~aiohttp.web.UrlDispatcher.register_resource`.
 Resource instance must implement `AbstractResource` interface.
 
 .. _aiohttp-web-app-runners:
@@ -849,9 +856,9 @@ sources (e.g. ZeroMQ, Redis Pub/Sub, AMQP, etc.) to react to received messages
 within the application.
 
 For example the background task could listen to ZeroMQ on
-:data:`zmq.SUB` socket, process and forward retrieved messages to
+``zmq.SUB`` socket, process and forward retrieved messages to
 clients connected via WebSocket that are stored somewhere in the
-application (e.g. in the :obj:`application['websockets']` list).
+application (e.g. in the ``application['websockets']`` list).
 
 To run such short and long running background tasks aiohttp provides an
 ability to register :attr:`Application.on_startup` signal handler(s) that
@@ -860,7 +867,8 @@ will run along with the application's request handler.
 For example there's a need to run one quick task and two long running
 tasks that will live till the application is alive. The appropriate
 background tasks could be registered as an :attr:`Application.on_startup`
-signal handlers as shown in the example below::
+signal handler or :attr:`Application.cleanup_ctx` as shown in the example
+below::
 
 
   async def listen_to_redis(app):
@@ -878,24 +886,69 @@ signal handlers as shown in the example below::
           await sub.quit()
 
 
-  async def start_background_tasks(app):
+  async def background_tasks(app):
       app['redis_listener'] = asyncio.create_task(listen_to_redis(app))
 
+      yield
 
-  async def cleanup_background_tasks(app):
       app['redis_listener'].cancel()
       await app['redis_listener']
 
 
   app = web.Application()
-  app.on_startup.append(start_background_tasks)
-  app.on_cleanup.append(cleanup_background_tasks)
+  app.cleanup_ctx.append(background_tasks)
   web.run_app(app)
 
 
-The task :func:`listen_to_redis` will run forever.
+The task ``listen_to_redis`` will run forever.
 To shut it down correctly :attr:`Application.on_cleanup` signal handler
 may be used to send a cancellation to it.
+
+.. _aiohttp-web-complex-applications:
+
+Complex Applications
+^^^^^^^^^^^^^^^^^^^^
+
+Sometimes aiohttp is not the sole part of an application and additional
+tasks/processes may need to be run alongside the aiohttp :class:`Application`.
+
+Generally, the best way to achieve this is to use :func:`aiohttp.web.run_app`
+as the entry point for the program. Other tasks can then be run via
+:attr:`Application.startup` and :attr:`Application.on_cleanup`. By having the
+:class:`Application` control the lifecycle of the entire program, the code
+will be more robust and ensure that the tasks are started and stopped along
+with the application.
+
+For example, running a long-lived task alongside the :class:`Application`
+can be done with a :ref:`aiohttp-web-cleanup-ctx` function like::
+
+
+  async def run_other_task(_app):
+      task = asyncio.create_task(other_long_task())
+
+      yield
+
+      task.cancel()
+      with suppress(asyncio.CancelledError):
+          await task  # Ensure any exceptions etc. are raised.
+
+  app.cleanup_ctx.append(run_other_task)
+
+
+Or a separate process can be run with something like::
+
+
+  async def run_process(_app):
+      proc = await asyncio.create_subprocess_exec(path)
+
+      yield
+
+      if proc.returncode is None:
+          proc.terminate()
+      await proc.wait()
+
+  app.cleanup_ctx.append(run_process)
+
 
 Handling error pages
 --------------------
@@ -995,8 +1048,7 @@ Install with ``pip``:
     $ pip install aiohttp-devtools
 
 * ``runserver`` provides a development server with auto-reload,
-  live-reload, static file serving and `aiohttp-debugtoolbar`_
-  integration.
+  live-reload, static file serving.
 * ``start`` is a `cookiecutter command which does the donkey work
   of creating new :mod:`aiohttp.web` Applications.
 
