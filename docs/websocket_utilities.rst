@@ -42,8 +42,8 @@ WebSocket utilities
        received a message that violates its policy.  This is a generic
        status code that can be returned when there is no other more
        suitable status code (e.g.,
-       :attr:`~WSCloseCode.unsupported_data` or
-       :attr:`~WSCloseCode.message_too_big`) or if there is a need to
+       :attr:`~aiohttp.WSCloseCode.UNSUPPORTED_DATA` or
+       :attr:`~aiohttp.WSCloseCode.MESSAGE_TOO_BIG`) or if there is a need to
        hide specific details about the policy.
 
     .. attribute:: MESSAGE_TOO_BIG
@@ -78,6 +78,18 @@ WebSocket utilities
        The service is experiencing overload. A client should only
        connect to a different IP (when there are multiple for the
        target) or reconnect to the same IP upon user action.
+
+    .. attribute:: ABNORMAL_CLOSURE
+
+       Used to indicate that a connection was closed abnormally
+       (that is, with no close frame being sent) when a status code
+       is expected.
+
+    .. attribute:: BAD_GATEWAY
+
+       The server was acting as a gateway or proxy and received
+       an invalid response from the upstream server.
+       This is similar to 502 HTTP Status Code.
 
 
 .. class:: WSMsgType

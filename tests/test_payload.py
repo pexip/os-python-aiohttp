@@ -4,7 +4,6 @@ from io import StringIO
 from unittest import mock
 
 import pytest
-from async_generator import async_generator
 
 from aiohttp import payload, streams
 
@@ -36,7 +35,9 @@ def test_register_unsupported_order(registry) -> None:
         pass
 
     with pytest.raises(ValueError):
-        payload.register_payload(Payload, TestProvider, order=object())
+        payload.register_payload(
+            Payload, TestProvider, order=object()  # type: ignore[arg-type]
+        )
 
 
 def test_payload_ctor() -> None:
@@ -65,7 +66,7 @@ def test_bytes_payload_explicit_content_type() -> None:
 
 def test_bytes_payload_bad_type() -> None:
     with pytest.raises(TypeError):
-        payload.BytesPayload(object())
+        payload.BytesPayload(object())  # type: ignore[arg-type]
 
 
 def test_bytes_payload_memoryview_correct_size() -> None:
@@ -97,18 +98,18 @@ def test_string_io_payload() -> None:
 
 
 def test_async_iterable_payload_default_content_type() -> None:
-    @async_generator
     async def gen():
-        pass
+        return
+        yield
 
     p = payload.AsyncIterablePayload(gen())
     assert p.content_type == "application/octet-stream"
 
 
 def test_async_iterable_payload_explicit_content_type() -> None:
-    @async_generator
     async def gen():
-        pass
+        return
+        yield
 
     p = payload.AsyncIterablePayload(gen(), content_type="application/custom")
     assert p.content_type == "application/custom"
@@ -122,9 +123,9 @@ def test_async_iterable_payload_not_async_iterable() -> None:
 
 async def test_stream_reader_long_lines() -> None:
     loop = asyncio.get_event_loop()
-    DATA = b"0" * 1024 ** 3
+    DATA = b"0" * 1024**3
 
-    stream = streams.StreamReader(mock.Mock(), 2 ** 16, loop=loop)
+    stream = streams.StreamReader(mock.Mock(), 2**16, loop=loop)
     stream.feed_data(DATA)
     stream.feed_eof()
     body = payload.get_payload(stream)

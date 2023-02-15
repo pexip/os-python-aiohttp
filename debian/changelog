@@ -1,3 +1,60 @@
+python-aiohttp (3.8.3-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 31 Oct 2022 09:58:46 +0100
+
+python-aiohttp (3.8.1-5) unstable; urgency=medium
+
+  [ Debian Janitor ]
+  * Remove constraints unnecessary since buster (oldstable):
+    + Build-Depends: Drop versioned constraint on python3-all-dev and
+      python3-yarl.
+    + python3-aiohttp: Drop versioned constraint on python3-yarl in Depends.
+
+ -- Jelmer Vernooĳ <jelmer@debian.org>  Fri, 14 Oct 2022 11:57:30 +0100
+
+python-aiohttp (3.8.1-4) unstable; urgency=high
+
+  * Team upload.
+  * debian/control: Add versioned dependency (Closes: #1001642):
+    + python3-async-timeout (>= 4.0.1)
+  * debian/py3dist-overrides: Add "idna_ssl python3-idna-ssl" line
+    to suppress build error raised by newer dh_python3.
+
+ -- Boyuan Yang <byang@debian.org>  Sun, 19 Dec 2021 01:05:53 -0500
+
+python-aiohttp (3.8.1-3) unstable; urgency=medium
+
+  * Add python3-charset-normalizer to (Build-)Depends (closes: 1000848)
+
+ -- Piotr Ożarowski <piotr@debian.org>  Tue, 30 Nov 2021 13:58:24 +0100
+
+python-aiohttp (3.8.1-2) unstable; urgency=medium
+
+  * New upstream release (closes: 1000680)
+  * docs: temporarily remove news (sphinxcontrib.towncrier is not yet packaged)
+
+ -- Piotr Ożarowski <piotr@debian.org>  Sat, 27 Nov 2021 17:20:40 +0100
+
+python-aiohttp (3.7.4-2) unstable; urgency=medium
+
+  * Team upload.
+
+  [ Diego M. Rodriguez ]
+  * d/control: add sphinx dependencies to doc package (Closes: #990652)
+
+  [ Debian Janitor ]
+  * Apply multi-arch hints.
+    + python-aiohttp-doc: Add Multi-Arch: foreign.
+  * Bump debhelper from old 12 to 13.
+
+  [ Boyuan Yang ]
+  * debian/: Drop manual -dbg package. (Closes: #994345)
+  * debian/control: Bump Standards-Version to 4.6.0.
+
+ -- Boyuan Yang <byang@debian.org>  Tue, 16 Nov 2021 12:03:24 -0500
+
 python-aiohttp (3.7.4-1pexip1) pexip; urgency=medium
 
   * Prepare Pexip packaging

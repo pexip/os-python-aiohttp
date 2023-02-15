@@ -1,0 +1,54 @@
+From: =?utf-8?q?Piotr_O=C5=BCarowski?= <piotr@debian.org>
+Date: Sat, 27 Nov 2021 17:48:20 +0100
+Subject: remove sphinxcontrib.towncrier for now
+
+not packaged in Debian yet
+---
+ docs/changes.rst | 9 +--------
+ docs/conf.py     | 2 +-
+ docs/index.rst   | 2 +-
+ 3 files changed, 3 insertions(+), 10 deletions(-)
+
+diff --git a/docs/changes.rst b/docs/changes.rst
+index 6a61dfb..fe6ab50 100644
+--- a/docs/changes.rst
++++ b/docs/changes.rst
+@@ -7,11 +7,4 @@ Changelog
+ To be included in v\ |release| (if present)
+ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 
+-.. towncrier-draft-entries:: |release| [UNRELEASED DRAFT]
+-
+-Released versions
+-^^^^^^^^^^^^^^^^^
+-
+-.. include:: ../CHANGES.rst
+-
+-.. include:: ../HISTORY.rst
++Temporarily removed in Debian, sorry.
+diff --git a/docs/conf.py b/docs/conf.py
+index 343527c..97aeb37 100644
+--- a/docs/conf.py
++++ b/docs/conf.py
+@@ -54,7 +54,7 @@ extensions = [
+     # Third-party extensions:
+     "sphinxcontrib.asyncio",
+     "sphinxcontrib.blockdiag",
+-    "sphinxcontrib.towncrier",  # provides `towncrier-draft-entries` directive
++    # "sphinxcontrib.towncrier",  # provides `towncrier-draft-entries` directive
+ ]
+ 
+ 
+diff --git a/docs/index.rst b/docs/index.rst
+index bc4d6d4..2b73621 100644
+--- a/docs/index.rst
++++ b/docs/index.rst
+@@ -122,7 +122,7 @@ For more information please visit :ref:`aiohttp-client` and
+ What's new in aiohttp 3?
+ ========================
+ 
+-Go to :ref:`aiohttp_whats_new_3_0` page for aiohttp 3.0 major release
++Go to aiohttp_whats_new_3_0 page for aiohttp 3.0 major release
+ changes.
+ 
+ 

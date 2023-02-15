@@ -1,6 +1,7 @@
 import asyncio
 import platform
 import signal
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -104,21 +105,17 @@ def test_non_app() -> None:
         web.AppRunner(object())
 
 
-@pytest.mark.skipif(
-    platform.system() == "Windows", reason="Unix socket support is required"
-)
-async def test_addresses(make_runner, shorttmpdir) -> None:
+async def test_addresses(make_runner, unix_sockname) -> None:
     _sock = get_unused_port_socket("127.0.0.1")
     runner = make_runner()
     await runner.setup()
     tcp = web.SockSite(runner, _sock)
     await tcp.start()
-    path = str(shorttmpdir / "tmp.sock")
-    unix = web.UnixSite(runner, path)
+    unix = web.UnixSite(runner, unix_sockname)
     await unix.start()
     actual_addrs = runner.addresses
     expected_host, expected_post = _sock.getsockname()[:2]
-    assert actual_addrs == [(expected_host, expected_post), path]
+    assert actual_addrs == [(expected_host, expected_post), unix_sockname]
 
 
 @pytest.mark.skipif(
@@ -162,3 +159,28 @@ async def test_tcpsite_default_host(make_runner):
     assert server is runner.server
     assert host is None
     assert port == 8080
+
+
+@pytest.mark.skipif(sys.version_info < (3, 7), reason="Requires asyncio.run()")
+def test_run_after_asyncio_run() -> None:
+    async def nothing():
+        pass
+
+    def spy():
+        spy.called = True
+
+    spy.called = False
+
+    async def shutdown():
+        spy()
+        raise web.GracefulExit()
+
+    # asyncio.run() creates a new loop and closes it.
+    asyncio.run(nothing())
+
+    app = web.Application()
+    # create_task() will delay the function until app is run.
+    app.on_startup.append(lambda a: asyncio.create_task(shutdown()))
+
+    web.run_app(app)
+    assert spy.called, "run_app() should work after asyncio.run()."

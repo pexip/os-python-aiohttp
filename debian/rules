@@ -11,18 +11,15 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
 override_dh_auto_build:
 	sed -i -e '/sphinxcontrib.asyncio/d' -e '/aiohttp_theme/d' docs/conf.py
-	${MAKE} -C docs html
+	${MAKE} -C docs html || true
 	dh_auto_build
 
 override_dh_auto_clean:
 	rm -rf .cache
 	dh_auto_clean
 
-override_dh_dwz:
-	dh_dwz -ppython3-aiohttp-dbg
-
 override_dh_strip:
-	dh_strip --no-automatic-dbgsym
+	dh_strip --dbgsym-migration='python3-aiohttp-dbg (<< 3.7.4-2~)'
 
 override_dh_auto_test:
 	# disable tests for now:
