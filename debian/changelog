@@ -1,3 +1,9 @@
+python-aiohttp (3.8.3-1pexip1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Huw Jones <huw@pexip.com>  Wed, 15 Feb 2023 15:05:11 +0000
+
 python-aiohttp (3.8.3-1) unstable; urgency=medium
 
   * New upstream release
