@@ -25,7 +25,7 @@ Build-Depends: debhelper-compat (= 13),
 # for documentation:
                python3-sphinxcontrib.blockdiag
 Rules-Requires-Root: no
-Standards-Version: 4.5.1
+Standards-Version: 4.6.2
 Homepage: https://aiohttp.readthedocs.org
 Vcs-Git: https://salsa.debian.org/python-team/packages/python-aiohttp.git
 Vcs-Browser: https://salsa.debian.org/python-team/packages/python-aiohttp
