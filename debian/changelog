@@ -1,3 +1,9 @@
+python-aiohttp (3.8.4-1pexip1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Huw Jones <huw@pexip.com>  Mon, 13 Mar 2023 16:48:16 +0000
+
 python-aiohttp (3.8.4-1) unstable; urgency=medium
 
   [ Debian Janitor ]
