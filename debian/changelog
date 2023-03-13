@@ -1,3 +1,13 @@
+python-aiohttp (3.8.4-1) unstable; urgency=medium
+
+  [ Debian Janitor ]
+  * Update standards version to 4.6.2, no changes needed.
+
+  [ Piotr Ożarowski ]
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Thu, 16 Feb 2023 11:54:52 +0100
+
 python-aiohttp (3.8.3-1pexip1) pexip; urgency=medium
 
   * New upstream release

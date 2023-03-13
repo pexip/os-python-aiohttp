@@ -1,5 +1,5 @@
 attrs>=17.3.0
-charset-normalizer<3.0,>=2.0
+charset-normalizer<4.0,>=2.0
 multidict<7.0,>=4.5
 async_timeout<5.0,>=4.0.0a3
 yarl<2.0,>=1.0
