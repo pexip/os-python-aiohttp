@@ -1,3 +1,14 @@
+python-aiohttp (3.8.4-1+deb12u1) bookworm-security; urgency=medium
+
+  * CVE-2023-47627
+  * CVE-2023-49081 (Closes: #1057163)
+  * CVE-2023-49082 (Closes: #1057164)
+  * CVE-2024-23334 (Closes: #1062709)
+  * CVE-2024-30251 (Closes: #1070364)
+  * CVE-2024-52304 (Closes: #1088109)
+
+ -- Moritz Mühlenhoff <jmm@debian.org>  Thu, 28 Nov 2024 20:38:32 +0100
+
 python-aiohttp (3.8.4-1+pexip24u5) pexip; urgency=medium
 
   * Rebuild for basket
