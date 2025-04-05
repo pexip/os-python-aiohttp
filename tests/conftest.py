@@ -1,16 +1,21 @@
 import asyncio
+import base64
 import os
 import socket
 import ssl
 import sys
-from hashlib import md5, sha256
+from hashlib import md5, sha1, sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, Generator
+from unittest import mock
 from uuid import uuid4
 
 import pytest
 
-from aiohttp.test_utils import loop_context
+from aiohttp.client_proto import ResponseHandler
+from aiohttp.http import WS_KEY
+from aiohttp.test_utils import get_unused_port_socket, loop_context
 
 try:
     import trustme
@@ -24,15 +29,8 @@ except ImportError:
 
 pytest_plugins = ["aiohttp.pytest_plugin", "pytester"]
 
-
 IS_HPUX = sys.platform.startswith("hp-ux")
-"""Specifies whether the current runtime is HP-UX."""
 IS_LINUX = sys.platform.startswith("linux")
-"""Specifies whether the current runtime is HP-UX."""
-IS_UNIX = hasattr(socket, "AF_UNIX")
-"""Specifies whether the current runtime is *NIX."""
-
-needs_unix = pytest.mark.skipif(not IS_UNIX, reason="requires UNIX sockets")
 
 
 @pytest.fixture
@@ -46,6 +44,7 @@ def tls_certificate_authority():
 def tls_certificate(tls_certificate_authority):
     return tls_certificate_authority.issue_cert(
         "localhost",
+        "xn--prklad-4va.localhost",
         "127.0.0.1",
         "::1",
     )
@@ -99,7 +98,7 @@ def unix_sockname(tmp_path, tmp_path_factory):
 
     Ref: https://github.com/aio-libs/aiohttp/issues/3572
     """
-    if not IS_UNIX:
+    if not hasattr(socket, "AF_UNIX"):
         pytest.skip("requires UNIX sockets")
 
     max_sock_len = 92 if IS_HPUX else 108 if IS_LINUX else 100
@@ -174,17 +173,95 @@ def pipe_name():
 
 
 @pytest.fixture
+def create_mocked_conn(loop: Any):
+    def _proto_factory(conn_closing_result=None, **kwargs):
+        proto = mock.create_autospec(ResponseHandler, **kwargs)
+        proto.closed = loop.create_future()
+        proto.closed.set_result(conn_closing_result)
+        return proto
+
+    yield _proto_factory
+
+
+@pytest.fixture
 def selector_loop():
-    if sys.version_info < (3, 7):
-        policy = asyncio.get_event_loop_policy()
-        policy._loop_factory = asyncio.SelectorEventLoop  # type: ignore
-    else:
-        if sys.version_info >= (3, 8):
-            policy = asyncio.WindowsSelectorEventLoopPolicy()  # type: ignore
-        else:
-            policy = asyncio.DefaultEventLoopPolicy()
-        asyncio.set_event_loop_policy(policy)
+    policy = asyncio.WindowsSelectorEventLoopPolicy()
+    asyncio.set_event_loop_policy(policy)
 
     with loop_context(policy.new_event_loop) as _loop:
         asyncio.set_event_loop(_loop)
         yield _loop
+
+
+@pytest.fixture
+def netrc_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+):
+    """
+    Prepare :file:`.netrc` with given contents.
+
+    Monkey-patches :envvar:`NETRC` to point to created file.
+    """
+    netrc_contents = getattr(request, "param", None)
+
+    netrc_file_path = tmp_path / ".netrc"
+    if netrc_contents is not None:
+        netrc_file_path.write_text(netrc_contents)
+
+    monkeypatch.setenv("NETRC", str(netrc_file_path))
+
+    return netrc_file_path
+
+
+@pytest.fixture
+def start_connection():
+    with mock.patch(
+        "aiohttp.connector.aiohappyeyeballs.start_connection",
+        autospec=True,
+        spec_set=True,
+        return_value=mock.create_autospec(socket.socket, spec_set=True, instance=True),
+    ) as start_connection_mock:
+        yield start_connection_mock
+
+
+@pytest.fixture
+def key_data():
+    return os.urandom(16)
+
+
+@pytest.fixture
+def key(key_data: Any):
+    return base64.b64encode(key_data)
+
+
+@pytest.fixture
+def ws_key(key: Any):
+    return base64.b64encode(sha1(key + WS_KEY).digest()).decode()
+
+
+@pytest.fixture
+def enable_cleanup_closed() -> Generator[None, None, None]:
+    """Fixture to override the NEEDS_CLEANUP_CLOSED flag.
+
+    On Python 3.12.7+ and 3.13.1+ enable_cleanup_closed is not needed,
+    however we still want to test that it works.
+    """
+    with mock.patch("aiohttp.connector.NEEDS_CLEANUP_CLOSED", True):
+        yield
+
+
+@pytest.fixture
+def unused_port_socket() -> Generator[socket.socket, None, None]:
+    """Return a socket that is unused on the current host.
+
+    Unlike aiohttp_used_port, the socket is yielded so there is no
+    race condition between checking if the port is in use and
+    binding to it later in the test.
+    """
+    s = get_unused_port_socket("127.0.0.1")
+    try:
+        yield s
+    finally:
+        s.close()

@@ -68,14 +68,14 @@ endpoints of ``http://httpbin.org`` can be used the following code::
 .. note::
 
    Don't create a session per request. Most likely you need a session
-   per application which performs all requests altogether.
+   per application which performs all requests together.
 
    More complex cases may require a session per site, e.g. one for
    Github and other one for Facebook APIs. Anyway making a session for
    every request is a **very bad** idea.
 
    A session contains a connection pool inside. Connection reusage and
-   keep-alives (both are on by default) may speed up total performance.
+   keep-alive (both are on by default) may speed up total performance.
 
 A session context manager usage is not mandatory
 but ``await session.close()`` method
@@ -93,7 +93,7 @@ Passing Parameters In URLs
 You often want to send some sort of data in the URL's query string. If
 you were constructing the URL by hand, this data would be given as key/value
 pairs in the URL after a question mark, e.g. ``httpbin.org/get?key=val``.
-Requests allows you to provide these arguments as a :class:`dict`, using the
+aiohttp allows you to provide these arguments as a :class:`dict`, using the
 ``params`` keyword argument. As an example, if you wanted to pass
 ``key1=value1`` and ``key2=value2`` to ``httpbin.org/get``, you would use the
 following code::
@@ -184,7 +184,8 @@ The ``gzip`` and ``deflate`` transfer-encodings are automatically
 decoded for you.
 
 You can enable ``brotli`` transfer-encodings support,
-just install  `brotli <https://github.com/python-hyper/Brotli>`_.
+just install `Brotli <https://pypi.org/project/Brotli/>`_
+or `brotlicffi <https://pypi.org/project/brotlicffi/>`_.
 
 JSON Request
 ============
@@ -313,7 +314,7 @@ To upload Multipart-encoded files::
 You can set the ``filename`` and ``content_type`` explicitly::
 
     url = 'http://httpbin.org/post'
-    data = FormData()
+    data = aiohttp.FormData()
     data.add_field('file',
                    open('report.xls', 'rb'),
                    filename='report.xls',
@@ -416,7 +417,8 @@ Timeouts
 Timeout settings are stored in :class:`ClientTimeout` data structure.
 
 By default *aiohttp* uses a *total* 300 seconds (5min) timeout, it means that the
-whole operation should finish in 5 minutes.
+whole operation should finish in 5 minutes. In order to allow time for DNS fallback,
+the default ``sock_connect`` timeout is 30 seconds.
 
 The value could be overridden by *timeout* parameter for the session (specified in seconds)::
 
@@ -453,13 +455,17 @@ Supported :class:`ClientTimeout` fields are:
       The maximal number of seconds allowed for period between reading a new
       data portion from a peer.
 
+    ``ceil_threshold``
+
+      The threshold value to trigger ceiling of absolute timeout values.
+
 All fields are floats, ``None`` or ``0`` disables a particular timeout check, see the
 :class:`ClientTimeout` reference for defaults and additional details.
 
 Thus the default timeout is::
 
    aiohttp.ClientTimeout(total=5*60, connect=None,
-                         sock_connect=None, sock_read=None)
+                         sock_connect=None, sock_read=None, ceil_threshold=5)
 
 .. note::
 
@@ -476,4 +482,5 @@ Thus the default timeout is::
    timeout expiration.
 
    Smaller timeouts are not rounded to help testing; in the real life network
-   timeouts usually greater than tens of seconds.
+   timeouts usually greater than tens of seconds. However, the default threshold
+   value of 5 seconds can be configured using the ``ceil_threshold`` parameter.

@@ -1,5 +1,5 @@
 import * as constants from './constants';
-import { enumToMap, IEnumMap } from './utils';
+import { enumToMap } from './utils';
 
 type Encoding = 'none' | 'hex';
 
@@ -22,6 +22,7 @@ export class CHeaders {
       constants.METHODS.PRI,
     ]);
     const rtspMethodMap = enumToMap(constants.METHODS, constants.METHODS_RTSP);
+    const statusMap = enumToMap(constants.STATUSES, constants.STATUSES_HTTP);
 
     res += this.buildEnum('llhttp_errno', 'HPE', errorMap);
     res += '\n';
@@ -38,6 +39,8 @@ export class CHeaders {
       enumToMap(constants.FINISH));
     res += '\n';
     res += this.buildEnum('llhttp_method', 'HTTP', methodMap);
+    res += '\n';
+    res += this.buildEnum('llhttp_status', 'HTTP_STATUS', statusMap);
 
     res += '\n';
 
@@ -48,6 +51,8 @@ export class CHeaders {
     res += this.buildMap('RTSP_METHOD', rtspMethodMap);
     res += '\n';
     res += this.buildMap('HTTP_ALL_METHOD', methodMap);
+    res += '\n';
+    res += this.buildMap('HTTP_STATUS', statusMap);
 
     res += '\n';
 
@@ -59,14 +64,16 @@ export class CHeaders {
     return res;
   }
 
-  private buildEnum(name: string, prefix: string, map: IEnumMap,
+  private buildEnum(name: string, prefix: string, map: constants.IntDict,
                     encoding: Encoding = 'none'): string {
     let res = '';
 
     res += `enum ${name} {\n`;
     const keys = Object.keys(map);
-    keys.forEach((key, i) => {
-      const isLast = i === keys.length - 1;
+    const keysLength = keys.length;
+    for (let i = 0; i < keysLength; i++) {
+      const key = keys[i];
+      const isLast = i === keysLength - 1;
 
       let value: number | string = map[key];
 
@@ -78,20 +85,20 @@ export class CHeaders {
       if (!isLast) {
         res += ',\n';
       }
-    });
+    }
     res += '\n};\n';
     res += `typedef enum ${name} ${name}_t;\n`;
 
     return res;
   }
 
-  private buildMap(name: string, map: IEnumMap): string {
+  private buildMap(name: string, map: constants.IntDict): string {
     let res = '';
 
     res += `#define ${name}_MAP(XX) \\\n`;
-    Object.keys(map).forEach((key) => {
-      res += `  XX(${map[key]!}, ${key.replace(/-/g, '')}, ${key}) \\\n`;
-    });
+    for (const [ key, value ] of Object.entries(map)) {
+      res += `  XX(${value!}, ${key.replace(/-/g, '')}, ${key}) \\\n`;
+    }
     res += '\n';
 
     return res;

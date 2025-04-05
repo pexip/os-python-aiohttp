@@ -85,6 +85,10 @@ accepts a list of any non-parsed command-line arguments and returns an
         return app
 
 
+.. note::
+   For local development we typically recommend using
+   `aiohttp-devtools <https://github.com/aio-libs/aiohttp-devtools>`_.
+
 .. _aiohttp-web-handler:
 
 Handler
@@ -143,6 +147,12 @@ for a ``GET`` request. You can also deny ``HEAD`` requests on a route::
 Here ``handler`` won't be called on ``HEAD`` request and the server
 will respond with ``405: Method Not Allowed``.
 
+.. seealso::
+
+   :ref:`aiohttp-web-peer-disconnection` section explains how handlers
+   behave when a client connection drops and ways to optimize handling
+   of this.
+
 .. _aiohttp-web-resource-and-route:
 
 Resources and Routes
@@ -159,7 +169,7 @@ Resource in turn has at least one *route*.
 
 Route corresponds to handling *HTTP method* by calling *web handler*.
 
-Thus when you add a *route* the *resouce* object is created under the hood.
+Thus when you add a *route* the *resource* object is created under the hood.
 
 The library implementation **merges** all subsequent route additions
 for the same path adding the only resource for all HTTP methods.
@@ -435,8 +445,11 @@ third-party library, :mod:`aiohttp_session`, that adds *session* support::
 
     async def handler(request):
         session = await get_session(request)
-        last_visit = session['last_visit'] if 'last_visit' in session else None
-        text = 'Last visited: {}'.format(last_visit)
+
+        last_visit = session.get("last_visit")
+        session["last_visit"] = time.time()
+        text = "Last visited: {}".format(last_visit)
+
         return web.Response(text=text)
 
     async def make_app():
@@ -757,3 +770,11 @@ unsupported method and list of allowed methods::
     HTTPMethodNotAllowed(method, allowed_methods, *,
                          headers=None, reason=None,
                          body=None, text=None, content_type=None)
+
+:class:`HTTPUnavailableForLegalReasons` should be constructed with a ``link``
+to yourself (as the entity implementing the blockage), and an explanation for
+the block included in ``text``.::
+
+    HTTPUnavailableForLegalReasons(link, *,
+                                   headers=None, reason=None,
+                                   body=None, text=None, content_type=None)

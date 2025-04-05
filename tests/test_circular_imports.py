@@ -7,9 +7,11 @@ This module is based on an idea that pytest uses for self-testing:
 * https://github.com/sanitizers/octomachinery/blob/be18b54/tests/circular_imports_test.py
 * https://github.com/pytest-dev/pytest/blob/d18c75b/testing/test_meta.py
 * https://twitter.com/codewithanthony/status/1229445110510735361
-"""  # noqa: E501
+"""
+
 import os
 import pkgutil
+import socket
 import subprocess
 import sys
 from itertools import chain
@@ -22,8 +24,6 @@ import pytest
 if TYPE_CHECKING:
     from _pytest.mark.structures import ParameterSet
 
-from conftest import IS_UNIX  # type: ignore[attr-defined]
-
 import aiohttp
 
 
@@ -31,12 +31,16 @@ def _mark_aiohttp_worker_for_skipping(
     importables: List[str],
 ) -> List[Union[str, "ParameterSet"]]:
     return [
-        pytest.param(
-            importable,
-            marks=pytest.mark.skipif(not IS_UNIX, reason="It's a UNIX-only module"),
+        (
+            pytest.param(
+                importable,
+                marks=pytest.mark.skipif(
+                    not hasattr(socket, "AF_UNIX"), reason="It's a UNIX-only module"
+                ),
+            )
+            if importable == "aiohttp.worker"
+            else importable
         )
-        if importable == "aiohttp.worker"
-        else importable
         for importable in importables
     ]
 
@@ -49,14 +53,7 @@ def _find_all_importables(pkg: ModuleType) -> List[str]:
     return sorted(
         set(
             chain.from_iterable(
-                _discover_path_importables(Path(p), pkg.__name__)
-                # FIXME: Unignore after upgrading to `mypy > 0.910`. The fix
-                # FIXME: is in the `master` branch of upstream since Aug 4,
-                # FIXME: 2021 but has not yet been included in any releases.
-                # Refs:
-                # * https://github.com/python/mypy/issues/1422
-                # * https://github.com/python/mypy/pull/9454
-                for p in pkg.__path__  # type: ignore[attr-defined]
+                _discover_path_importables(Path(p), pkg.__name__) for p in pkg.__path__
             ),
         ),
     )
@@ -106,13 +103,14 @@ def test_no_warnings(import_path: str) -> None:
         # https://github.com/benoitc/gunicorn/issues/2840 for detail.
         "-W", "ignore:module 'sre_constants' is "
         "deprecated:DeprecationWarning:pkg_resources._vendor.pyparsing",
-        # The following deprecation warning is coming from an old
-        # version of `setuptools` (the last one to support Python 3.6).
-        # It is stepping on it's own toes. But since it doesn't
-        # originate in aiohttp, we don't care much about it.
-        "-W",
-        "ignore:Creating a LegacyVersion has been deprecated and will "
-        "be removed in the next major release:DeprecationWarning:",
+        # Also caused by `gunicorn.util` importing `pkg_resources`:
+        "-W", "ignore:Creating a LegacyVersion has been deprecated and "
+        "will be removed in the next major release:"
+        "DeprecationWarning:",
+        # Deprecation warning emitted by setuptools v67.5.0+ triggered by importing
+        # `gunicorn.util`.
+        "-W", "ignore:pkg_resources is deprecated as an API:"
+        "DeprecationWarning",
         "-c", f"import {import_path!s}",
         # fmt: on
     )

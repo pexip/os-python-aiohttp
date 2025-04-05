@@ -2,10 +2,11 @@
 
 import errno
 import pickle
-import sys
 from unittest import mock
 
 import pytest
+from multidict import CIMultiDict
+from yarl import URL
 
 from aiohttp import client, client_reqrep
 
@@ -44,7 +45,7 @@ class TestClientResponseError:
             history=(),
             status=400,
             message="Something wrong",
-            headers={},
+            headers=CIMultiDict(foo="bar"),
         )
         err.foo = "bar"
         for proto in range(pickle.HIGHEST_PROTOCOL + 1):
@@ -54,7 +55,8 @@ class TestClientResponseError:
             assert err2.history == ()
             assert err2.status == 400
             assert err2.message == "Something wrong"
-            assert err2.headers == {}
+            # Use headers.get() to verify static type is correct.
+            assert err2.headers.get("foo") == "bar"
             assert err2.foo == "bar"
 
     def test_repr(self) -> None:
@@ -66,11 +68,11 @@ class TestClientResponseError:
             history=(),
             status=400,
             message="Something wrong",
-            headers={},
+            headers=CIMultiDict(),
         )
         assert repr(err) == (
             "ClientResponseError(%r, (), status=400, "
-            "message='Something wrong', headers={})" % (self.request_info,)
+            "message='Something wrong', headers=<CIMultiDict()>)" % (self.request_info,)
         )
 
     def test_str(self) -> None:
@@ -79,11 +81,9 @@ class TestClientResponseError:
             history=(),
             status=400,
             message="Something wrong",
-            headers={},
+            headers=CIMultiDict(),
         )
-        assert str(err) == (
-            "400, message='Something wrong', " "url='http://example.com'"
-        )
+        assert str(err) == ("400, message='Something wrong', url='http://example.com'")
 
 
 def test_response_status() -> None:
@@ -120,7 +120,7 @@ class TestClientConnectorError:
         host="example.com",
         port=8080,
         is_ssl=False,
-        ssl=None,
+        ssl=True,
         proxy=None,
         proxy_auth=None,
         proxy_headers_hash=None,
@@ -137,7 +137,7 @@ class TestClientConnectorError:
         assert err.os_error.strerror == "No such file"
         assert err.host == "example.com"
         assert err.port == 8080
-        assert err.ssl is None
+        assert err.ssl is True
 
     def test_pickle(self) -> None:
         err = client.ClientConnectorError(
@@ -154,7 +154,7 @@ class TestClientConnectorError:
             assert err2.os_error.strerror == "No such file"
             assert err2.host == "example.com"
             assert err2.port == 8080
-            assert err2.ssl is None
+            assert err2.ssl is True
             assert err2.foo == "bar"
 
     def test_repr(self) -> None:
@@ -172,7 +172,7 @@ class TestClientConnectorError:
             os_error=OSError(errno.ENOENT, "No such file"),
         )
         assert str(err) == (
-            "Cannot connect to host example.com:8080 ssl:" "default [No such file]"
+            "Cannot connect to host example.com:8080 ssl:default [No such file]"
         )
 
 
@@ -181,7 +181,7 @@ class TestClientConnectorCertificateError:
         host="example.com",
         port=8080,
         is_ssl=False,
-        ssl=None,
+        ssl=True,
         proxy=None,
         proxy_auth=None,
         proxy_headers_hash=None,
@@ -252,16 +252,10 @@ class TestServerDisconnectedError:
 
     def test_repr(self) -> None:
         err = client.ServerDisconnectedError()
-        if sys.version_info < (3, 7):
-            assert repr(err) == ("ServerDisconnectedError" "('Server disconnected',)")
-        else:
-            assert repr(err) == ("ServerDisconnectedError" "('Server disconnected')")
+        assert repr(err) == ("ServerDisconnectedError('Server disconnected')")
 
         err = client.ServerDisconnectedError(message="No connection")
-        if sys.version_info < (3, 7):
-            assert repr(err) == "ServerDisconnectedError('No connection',)"
-        else:
-            assert repr(err) == "ServerDisconnectedError('No connection')"
+        assert repr(err) == "ServerDisconnectedError('No connection')"
 
     def test_str(self) -> None:
         err = client.ServerDisconnectedError()
@@ -305,8 +299,9 @@ class TestServerFingerprintMismatch:
 
 class TestInvalidURL:
     def test_ctor(self) -> None:
-        err = client.InvalidURL(url=":wrong:url:")
+        err = client.InvalidURL(url=":wrong:url:", description=":description:")
         assert err.url == ":wrong:url:"
+        assert err.description == ":description:"
 
     def test_pickle(self) -> None:
         err = client.InvalidURL(url=":wrong:url:")
@@ -317,10 +312,27 @@ class TestInvalidURL:
             assert err2.url == ":wrong:url:"
             assert err2.foo == "bar"
 
-    def test_repr(self) -> None:
+    def test_repr_no_description(self) -> None:
         err = client.InvalidURL(url=":wrong:url:")
+        assert err.args == (":wrong:url:",)
         assert repr(err) == "<InvalidURL :wrong:url:>"
 
-    def test_str(self) -> None:
+    def test_repr_yarl_URL(self) -> None:
+        err = client.InvalidURL(url=URL(":wrong:url:"))
+        assert repr(err) == "<InvalidURL :wrong:url:>"
+
+    def test_repr_with_description(self) -> None:
+        err = client.InvalidURL(url=":wrong:url:", description=":description:")
+        assert repr(err) == "<InvalidURL :wrong:url: - :description:>"
+
+    def test_str_no_description(self) -> None:
         err = client.InvalidURL(url=":wrong:url:")
         assert str(err) == ":wrong:url:"
+
+    def test_none_description(self) -> None:
+        err = client.InvalidURL(":wrong:url:")
+        assert err.description is None
+
+    def test_str_with_description(self) -> None:
+        err = client.InvalidURL(url=":wrong:url:", description=":description:")
+        assert str(err) == ":wrong:url: - :description:"

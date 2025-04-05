@@ -5,12 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List
 
 import pytest
+import python_on_whales
 from pytest import TempPathFactory
-
-python_on_whales = pytest.importorskip(
-    "python_on_whales",
-    reason="'python-on-whales' requires Python 3.7+",
-)
 
 
 @pytest.fixture(scope="session")
@@ -77,7 +73,8 @@ def test_client(report_dir: Path, request: Any) -> None:
         print("Stopping client and server")
         client.terminate()
         client.wait()
-        autobahn_container.stop()
+        # https://github.com/gabrieldemarmiesse/python-on-whales/pull/580
+        autobahn_container.stop()  # type: ignore[union-attr]
 
     failed_messages = get_failed_tests(f"{report_dir}/clients", "aiohttp")
 
