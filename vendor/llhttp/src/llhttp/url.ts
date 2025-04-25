@@ -7,8 +7,6 @@ import {
   ALPHA,
   CharList,
   ERROR,
-  HTTPMode,
-  STRICT_URL_CHAR,
   URL_CHAR,
   USERINFO_CHARS,
 } from './constants';
@@ -29,22 +27,16 @@ export interface IURLResult {
 type SpanTable = Map<SpanName, source.Span>;
 
 export class URL {
-  private readonly span: source.Span | undefined;
   private readonly spanTable: SpanTable = new Map();
   private readonly errorInvalid: Node;
-  private readonly errorStrictInvalid: Node;
   private readonly URL_CHAR: CharList;
 
-  constructor(private readonly llparse: LLParse,
-              private readonly mode: HTTPMode = 'loose',
-              separateSpans: boolean = false) {
+  constructor(private readonly llparse: LLParse, separateSpans: boolean = false) {
     const p = this.llparse;
 
     this.errorInvalid = p.error(ERROR.INVALID_URL, 'Invalid characters in url');
-    this.errorStrictInvalid =
-      p.error(ERROR.INVALID_URL, 'Invalid characters in url (strict mode)');
 
-    this.URL_CHAR = mode === 'strict' ? STRICT_URL_CHAR : URL_CHAR;
+    this.URL_CHAR = URL_CHAR;
 
     const table = this.spanTable;
     if (separateSpans) {
@@ -98,10 +90,7 @@ export class URL {
       .match('//', this.spanStart('host', server))
       .otherwise(p.error(ERROR.INVALID_URL, 'Unexpected char in url schema'));
 
-    [
-      server,
-      serverWithAt,
-    ].forEach((node) => {
+    for (const node of [ server, serverWithAt ]) {
       node
         .peek('/', this.spanEnd('host', this.spanStart('path').skipTo(path)))
         .match('?', this.spanEnd('host', this.spanStart('query', query)))
@@ -112,7 +101,7 @@ export class URL {
       if (node !== serverWithAt) {
         node.match('@', serverWithAt);
       }
-    });
+    }
 
     serverWithAt
       .match('@', p.error(ERROR.INVALID_URL, 'Double @ in url'));
@@ -142,10 +131,10 @@ export class URL {
       .otherwise(
         p.error(ERROR.INVALID_URL, 'Invalid char in url fragment start'));
 
-    [ start, schema, schemaDelim ].forEach((node) => {
+    for (const node of [ start, schema, schemaDelim ]) {
       /* No whitespace allowed here */
       node.match([ ' ', '\r', '\n' ], this.errorInvalid);
-    });
+    }
 
     // Adaptors
     const toHTTP = this.node('to_http');
@@ -161,10 +150,7 @@ export class URL {
       .match('\r\n', toHTTP09)
       .otherwise(p.error(ERROR.INVALID_URL, 'Expected CRLF'));
 
-    [
-      server, serverWithAt, queryOrFragment, queryStart, query,
-      fragment,
-    ].forEach((node) => {
+    for (const node of [ server, serverWithAt, queryOrFragment, queryStart, query, fragment ]) {
       let spanName: SpanName | undefined;
 
       if (node === server || node === serverWithAt) {
@@ -187,7 +173,7 @@ export class URL {
 
       node.peek('\r', endTo(skipCRLF));
       node.peek('\n', endTo(skipToHTTP09));
-    });
+    }
 
     return {
       entry,
@@ -227,9 +213,7 @@ export class URL {
   private node(name: string): Match {
     const res = this.llparse.node('url_' + name);
 
-    if (this.mode === 'strict') {
-      res.match([ '\t', '\f' ], this.errorStrictInvalid);
-    }
+    res.match([ '\t', '\f' ], this.errorInvalid);
 
     return res;
   }

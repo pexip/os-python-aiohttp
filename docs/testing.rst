@@ -32,20 +32,6 @@ insert ``pytest_plugins = 'aiohttp.pytest_plugin'`` line into
 
 
 
-Provisional Status
-~~~~~~~~~~~~~~~~~~
-
-The module is a **provisional**.
-
-*aiohttp* has a year and half period for removing deprecated API
-(:ref:`aiohttp-backward-compatibility-policy`).
-
-But for :mod:`aiohttp.test_tools` the deprecation period could be reduced.
-
-Moreover we may break *backward compatibility* without *deprecation
-period* for some very strong reason.
-
-
 The Test Client and Servers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -76,14 +62,19 @@ Pytest
 The :data:`aiohttp_client` fixture available from pytest-aiohttp_ plugin
 allows you to create a client to make requests to test your app.
 
-A simple would be::
+To run these examples, you need to use `--asyncio-mode=auto` or add to your
+pytest config file::
+
+    asyncio_mode = auto
+
+A simple test would be::
 
     from aiohttp import web
 
     async def hello(request):
         return web.Response(text='Hello, world')
 
-    async def test_hello(aiohttp_client, loop):
+    async def test_hello(aiohttp_client):
         app = web.Application()
         app.router.add_get('/', hello)
         client = await aiohttp_client(app)
@@ -100,29 +91,31 @@ app test client::
     import pytest
     from aiohttp import web
 
+    value = web.AppKey("value", str)
+
 
     async def previous(request):
         if request.method == 'POST':
-            request.app['value'] = (await request.post())['value']
+            request.app[value] = (await request.post())['value']
             return web.Response(body=b'thanks for the data')
         return web.Response(
-            body='value: {}'.format(request.app['value']).encode('utf-8'))
+            body='value: {}'.format(request.app[value]).encode('utf-8'))
 
     @pytest.fixture
-    def cli(loop, aiohttp_client):
+    async def cli(aiohttp_client):
         app = web.Application()
         app.router.add_get('/', previous)
         app.router.add_post('/', previous)
-        return loop.run_until_complete(aiohttp_client(app))
+        return await aiohttp_client(app)
 
     async def test_set_value(cli):
         resp = await cli.post('/', data={'value': 'foo'})
         assert resp.status == 200
         assert await resp.text() == 'thanks for the data'
-        assert cli.server.app['value'] == 'foo'
+        assert cli.server.app[value] == 'foo'
 
     async def test_get_value(cli):
-        cli.server.app['value'] = 'bar'
+        cli.server.app[value] = 'bar'
         resp = await cli.get('/')
         assert resp.status == 200
         assert await resp.text() == 'value: bar'
@@ -269,9 +262,12 @@ functionality, the AioHTTPTestCase is provided::
 
     A base class to allow for unittest web applications using aiohttp.
 
-    Derived from :class:`unittest.TestCase`
+    Derived from :class:`unittest.IsolatedAsyncioTestCase`
 
-    Provides the following:
+    See :class:`unittest.TestCase` and :class:`unittest.IsolatedAsyncioTestCase`
+    for inherited methods and behavior.
+
+    This class additionally provides the following:
 
     .. attribute:: client
 
@@ -283,18 +279,13 @@ functionality, the AioHTTPTestCase is provided::
 
        .. versionadded:: 2.3
 
-    .. attribute:: loop
-
-       The event loop in which the application and server are running.
-
-       .. deprecated:: 3.5
-
     .. attribute:: app
 
        The application returned by :meth:`~aiohttp.test_utils.AioHTTPTestCase.get_application`
        (:class:`aiohttp.web.Application` instance).
 
-    .. comethod:: get_client()
+    .. method:: get_client()
+      :async:
 
        This async method can be overridden to return the :class:`TestClient`
        object used in the test.
@@ -303,7 +294,8 @@ functionality, the AioHTTPTestCase is provided::
 
        .. versionadded:: 2.3
 
-    .. comethod:: get_server()
+    .. method:: get_server()
+      :async:
 
        This async method can be overridden to return the :class:`TestServer`
        object used in the test.
@@ -312,7 +304,8 @@ functionality, the AioHTTPTestCase is provided::
 
        .. versionadded:: 2.3
 
-    .. comethod:: get_application()
+    .. method:: get_application()
+      :async:
 
        This async method should be overridden
        to return the :class:`aiohttp.web.Application`
@@ -320,72 +313,40 @@ functionality, the AioHTTPTestCase is provided::
 
        :return: :class:`aiohttp.web.Application` instance.
 
-    .. comethod:: setUpAsync()
+    .. method:: asyncSetUp()
+      :async:
 
        This async method can be overridden to execute asynchronous code during
        the ``setUp`` stage of the ``TestCase``::
 
-           async def setUpAsync(self):
-               await super().setUpAsync()
+           async def asyncSetUp(self):
+               await super().asyncSetUp()
                await foo()
 
        .. versionadded:: 2.3
 
        .. versionchanged:: 3.8
 
-          ``await super().setUpAsync()`` call is required.
+          ``await super().asyncSetUp()`` call is required.
 
-    .. comethod:: tearDownAsync()
+    .. method:: asyncTearDown()
+      :async:
 
        This async method can be overridden to execute asynchronous code during
        the ``tearDown`` stage of the ``TestCase``::
 
-           async def tearDownAsync(self):
-               await super().tearDownAsync()
+           async def asyncTearDown(self):
+               await super().asyncTearDown()
                await foo()
 
        .. versionadded:: 2.3
 
        .. versionchanged:: 3.8
 
-          ``await super().tearDownAsync()`` call is required.
-
-    .. method:: setUp()
-
-       Standard test initialization method.
-
-    .. method:: tearDown()
-
-       Standard test finalization method.
-
-
-   .. note::
-
-      The ``TestClient``'s methods are asynchronous: you have to
-      execute functions on the test client using asynchronous methods.::
-
-         class TestA(AioHTTPTestCase):
-
-             async def test_f(self):
-                 async with self.client.get('/') as resp:
-                     body = await resp.text()
-
-
-.. decorator:: unittest_run_loop:
-
-   A decorator dedicated to use with asynchronous methods of an
-   :class:`AioHTTPTestCase`.
-
-   Handles executing an asynchronous function, using
-   the :attr:`AioHTTPTestCase.loop` of the :class:`AioHTTPTestCase`.
-
-   .. deprecated:: 3.8
-       In 3.8+ :class:`AioHTTPTestCase` inherits from :class:`unittest.IsolatedAsyncioTestCase`
-       making this decorator unneeded. It is now a no-op.
-
+          ``await super().asyncTearDown()`` call is required.
 
 Faking request object
----------------------
+^^^^^^^^^^^^^^^^^^^^^
 
 aiohttp provides test utility for creating fake
 :class:`aiohttp.web.Request` objects:
@@ -443,7 +404,7 @@ conditions that hard to reproduce on real server::
 
    :param headers: mapping containing the headers. Can be anything accepted
        by the multidict.CIMultiDict constructor.
-   :type headers: dict, multidict.CIMultiDict, list of pairs
+   :type headers: dict, multidict.CIMultiDict, list of tuple(str, str)
 
    :param match_info: mapping containing the info to match with url parameters.
    :type match_info: dict
@@ -484,18 +445,16 @@ conditions that hard to reproduce on real server::
 
 
 Framework Agnostic Utilities
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+----------------------------
 
 High level test creation::
 
-    from aiohttp.test_utils import TestClient, TestServer, loop_context
+    from aiohttp.test_utils import TestClient, TestServer
     from aiohttp import request
 
-    # loop_context is provided as a utility. You can use any
-    # asyncio.BaseEventLoop class in its place.
-    with loop_context() as loop:
+    async def test():
         app = _create_example_app()
-        with TestClient(TestServer(app), loop=loop) as client:
+        async with TestClient(TestServer(app)) as client:
 
             async def test_get_route():
                 nonlocal client
@@ -504,7 +463,7 @@ High level test creation::
                 text = await resp.text()
                 assert "Hello, world" in text
 
-            loop.run_until_complete(test_get_route())
+            await test_get_route()
 
 
 If it's preferred to handle the creation / teardown on a more granular
@@ -512,10 +471,10 @@ basis, the TestClient object can be used directly::
 
     from aiohttp.test_utils import TestClient, TestServer
 
-    with loop_context() as loop:
+    async def test():
         app = _create_example_app()
-        client = TestClient(TestServer(app), loop=loop)
-        loop.run_until_complete(client.start_server())
+        client = TestClient(TestServer(app))
+        await client.start_server()
         root = "http://127.0.0.1:{}".format(port)
 
         async def test_get_route():
@@ -524,8 +483,8 @@ basis, the TestClient object can be used directly::
             text = await resp.text()
             assert "Hello, world" in text
 
-        loop.run_until_complete(test_get_route())
-        loop.run_until_complete(client.close())
+        await test_get_route()
+        await client.close()
 
 
 A full list of the utilities provided can be found at the
@@ -597,14 +556,16 @@ for accessing to the server.
 
       .. versionadded:: 3.8
 
-   .. comethod:: start_server(loop=None, **kwargs)
+   .. method:: start_server(loop=None, **kwargs)
+      :async:
 
       :param loop: the event_loop to use
       :type loop: asyncio.AbstractEventLoop
 
       Start a test server.
 
-   .. comethod:: close()
+   .. method:: close()
+      :async:
 
       Stop and finish executed test server.
 
@@ -721,11 +682,13 @@ Test Client
       requests do not automatically include the host in the url
       queried, and will require an absolute path to the resource.
 
-   .. comethod:: start_server(**kwargs)
+   .. method:: start_server(**kwargs)
+      :async:
 
       Start a test server.
 
-   .. comethod:: close()
+   .. method:: close()
+      :async:
 
       Stop and finish executed test server.
 
@@ -733,7 +696,8 @@ Test Client
 
       Return an *absolute* :class:`~yarl.URL` for given *path*.
 
-   .. comethod:: request(method, path, *args, **kwargs)
+   .. method:: request(method, path, *args, **kwargs)
+      :async:
 
       Routes a request to tested http server.
 
@@ -741,35 +705,43 @@ Test Client
       :meth:`aiohttp.ClientSession.request`, except the loop kwarg is
       overridden by the instance used by the test server.
 
-   .. comethod:: get(path, *args, **kwargs)
+   .. method:: get(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP GET request.
 
-   .. comethod:: post(path, *args, **kwargs)
+   .. method:: post(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP POST request.
 
-   .. comethod:: options(path, *args, **kwargs)
+   .. method:: options(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP OPTIONS request.
 
-   .. comethod:: head(path, *args, **kwargs)
+   .. method:: head(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP HEAD request.
 
-   .. comethod:: put(path, *args, **kwargs)
+   .. method:: put(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP PUT request.
 
-   .. comethod:: patch(path, *args, **kwargs)
+   .. method:: patch(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP PATCH request.
 
-   .. comethod:: delete(path, *args, **kwargs)
+   .. method:: delete(path, *args, **kwargs)
+      :async:
 
       Perform an HTTP DELETE request.
 
-   .. comethod:: ws_connect(path, *args, **kwargs)
+   .. method:: ws_connect(path, *args, **kwargs)
+      :async:
 
       Initiate websocket connection.
 
@@ -792,7 +764,7 @@ Utilities
       mocked.assert_called_with(1, 2)
 
 
-  :param return_value: A value that the the mock object will return when
+  :param return_value: A value that the mock object will return when
       called.
   :returns: A mock object that behaves as a coroutine which returns
       *return_value* when called.

@@ -1,19 +1,23 @@
 import collections.abc
 import datetime
 import gzip
+import io
 import json
+import zlib
 from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncIterator, Optional
 from unittest import mock
 
 import aiosignal
 import pytest
-from multidict import CIMultiDict, CIMultiDictProxy
+from multidict import CIMultiDict, CIMultiDictProxy, MultiDict
 from re_assert import Matches
 
 from aiohttp import HttpVersion, HttpVersion10, HttpVersion11, hdrs
 from aiohttp.helpers import ETag
-from aiohttp.http_writer import _serialize_headers
-from aiohttp.payload import BytesPayload
+from aiohttp.http_writer import StreamWriter, _serialize_headers
+from aiohttp.multipart import BodyPartReader, MultipartWriter
+from aiohttp.payload import BytesPayload, StringPayload
 from aiohttp.test_utils import make_mocked_coro, make_mocked_request
 from aiohttp.web import ContentCoding, Response, StreamResponse, json_response
 
@@ -458,7 +462,7 @@ async def test_compression_default_coding() -> None:
 
     msg = await resp.prepare(req)
 
-    msg.enable_compression.assert_called_with("deflate")
+    msg.enable_compression.assert_called_with("deflate", zlib.Z_DEFAULT_STRATEGY)
     assert "deflate" == resp.headers.get(hdrs.CONTENT_ENCODING)
     assert msg.filter is not None
 
@@ -473,7 +477,26 @@ async def test_force_compression_deflate() -> None:
     assert resp.compression
 
     msg = await resp.prepare(req)
-    msg.enable_compression.assert_called_with("deflate")
+    msg.enable_compression.assert_called_with("deflate", zlib.Z_DEFAULT_STRATEGY)
+    assert "deflate" == resp.headers.get(hdrs.CONTENT_ENCODING)
+
+
+async def test_force_compression_deflate_large_payload() -> None:
+    """Make sure a warning is thrown for large payloads compressed in the event loop."""
+    req = make_request(
+        "GET", "/", headers=CIMultiDict({hdrs.ACCEPT_ENCODING: "gzip, deflate"})
+    )
+    resp = Response(body=b"large")
+
+    resp.enable_compression(ContentCoding.deflate)
+    assert resp.compression
+
+    with (
+        pytest.warns(Warning, match="Synchronous compression of large response bodies"),
+        mock.patch("aiohttp.web_response.LARGE_BODY_SIZE", 2),
+    ):
+        msg = await resp.prepare(req)
+        assert msg is not None
     assert "deflate" == resp.headers.get(hdrs.CONTENT_ENCODING)
 
 
@@ -485,7 +508,7 @@ async def test_force_compression_no_accept_deflate() -> None:
     assert resp.compression
 
     msg = await resp.prepare(req)
-    msg.enable_compression.assert_called_with("deflate")
+    msg.enable_compression.assert_called_with("deflate", zlib.Z_DEFAULT_STRATEGY)
     assert "deflate" == resp.headers.get(hdrs.CONTENT_ENCODING)
 
 
@@ -499,7 +522,7 @@ async def test_force_compression_gzip() -> None:
     assert resp.compression
 
     msg = await resp.prepare(req)
-    msg.enable_compression.assert_called_with("gzip")
+    msg.enable_compression.assert_called_with("gzip", zlib.Z_DEFAULT_STRATEGY)
     assert "gzip" == resp.headers.get(hdrs.CONTENT_ENCODING)
 
 
@@ -511,7 +534,7 @@ async def test_force_compression_no_accept_gzip() -> None:
     assert resp.compression
 
     msg = await resp.prepare(req)
-    msg.enable_compression.assert_called_with("gzip")
+    msg.enable_compression.assert_called_with("gzip", zlib.Z_DEFAULT_STRATEGY)
     assert "gzip" == resp.headers.get(hdrs.CONTENT_ENCODING)
 
 
@@ -642,7 +665,6 @@ async def test_rm_content_length_if_compression_http11() -> None:
     req = make_request("GET", "/", writer=writer)
     payload = BytesPayload(b"answer", headers={"X-Test-Header": "test"})
     resp = Response(body=payload)
-    assert resp.content_length == 6
     resp.body = payload
     resp.enable_compression(ContentCoding.gzip)
     await resp.prepare(req)
@@ -662,6 +684,90 @@ async def test_rm_content_length_if_compression_http10() -> None:
     resp.enable_compression(ContentCoding.gzip)
     await resp.prepare(req)
     assert resp.content_length is None
+
+
+async def test_rm_content_length_if_204() -> None:
+    """Ensure content-length is removed for 204 responses."""
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+
+    async def write_headers(status_line, headers):
+        assert hdrs.CONTENT_LENGTH not in headers
+
+    writer.write_headers.side_effect = write_headers
+    req = make_request("GET", "/", writer=writer)
+    payload = BytesPayload(b"answer", headers={"Content-Length": "6"})
+    resp = Response(body=payload, status=204)
+    resp.body = payload
+    await resp.prepare(req)
+    assert resp.content_length is None
+
+
+@pytest.mark.parametrize("status", (100, 101, 204, 304))
+async def test_rm_transfer_encoding_rfc_9112_6_3_http_11(status: int) -> None:
+    """Remove transfer encoding for RFC 9112 sec 6.3 with HTTP/1.1."""
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+    req = make_request("GET", "/", version=HttpVersion11, writer=writer)
+    resp = Response(status=status, headers={hdrs.TRANSFER_ENCODING: "chunked"})
+    await resp.prepare(req)
+    assert resp.content_length == 0
+    assert not resp.chunked
+    assert hdrs.CONTENT_LENGTH not in resp.headers
+    assert hdrs.TRANSFER_ENCODING not in resp.headers
+
+
+@pytest.mark.parametrize("status", (100, 101, 102, 204, 304))
+async def test_rm_content_length_1xx_204_304_responses(status: int) -> None:
+    """Remove content length for 1xx, 204, and 304 responses.
+
+    Content-Length is forbidden for 1xx and 204
+    https://datatracker.ietf.org/doc/html/rfc7230#section-3.3.2
+
+    Content-Length is discouraged for 304.
+    https://datatracker.ietf.org/doc/html/rfc7232#section-4.1
+    """
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+    req = make_request("GET", "/", version=HttpVersion11, writer=writer)
+    resp = Response(status=status, body="answer")
+    await resp.prepare(req)
+    assert not resp.chunked
+    assert hdrs.CONTENT_LENGTH not in resp.headers
+    assert hdrs.TRANSFER_ENCODING not in resp.headers
+
+
+async def test_head_response_keeps_content_length_of_original_body() -> None:
+    """Verify HEAD response keeps the content length of the original body HTTP/1.1."""
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+    req = make_request("HEAD", "/", version=HttpVersion11, writer=writer)
+    resp = Response(status=200, body=b"answer")
+    await resp.prepare(req)
+    assert resp.content_length == 6
+    assert not resp.chunked
+    assert resp.headers[hdrs.CONTENT_LENGTH] == "6"
+    assert hdrs.TRANSFER_ENCODING not in resp.headers
+
+
+async def test_head_response_omits_content_length_when_body_unset() -> None:
+    """Verify HEAD response omits content-length body when its unset."""
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+    req = make_request("HEAD", "/", version=HttpVersion11, writer=writer)
+    resp = Response(status=200)
+    await resp.prepare(req)
+    assert resp.content_length == 0
+    assert not resp.chunked
+    assert hdrs.CONTENT_LENGTH not in resp.headers
+    assert hdrs.TRANSFER_ENCODING not in resp.headers
+
+
+async def test_304_response_omits_content_length_when_body_unset() -> None:
+    """Verify 304 response omits content-length body when its unset."""
+    writer = mock.create_autospec(StreamWriter, spec_set=True, instance=True)
+    req = make_request("GET", "/", version=HttpVersion11, writer=writer)
+    resp = Response(status=304)
+    await resp.prepare(req)
+    assert resp.content_length == 0
+    assert not resp.chunked
+    assert hdrs.CONTENT_LENGTH not in resp.headers
+    assert hdrs.TRANSFER_ENCODING not in resp.headers
 
 
 async def test_content_length_on_chunked() -> None:
@@ -706,11 +812,8 @@ async def test___repr___after_eof() -> None:
     resp = StreamResponse()
     await resp.prepare(make_request("GET", "/"))
 
-    assert resp.prepared
-
     await resp.write(b"data")
     await resp.write_eof()
-    assert not resp.prepared
     resp_repr = repr(resp)
     assert resp_repr == "<StreamResponse OK eof>"
 
@@ -762,6 +865,10 @@ def test_response_cookies() -> None:
 
     resp.set_cookie("name", "value")
     assert str(resp.cookies) == "Set-Cookie: name=value; Path=/"
+    resp.set_cookie("name", "")
+    assert str(resp.cookies) == 'Set-Cookie: name=""; Path=/'
+    resp.set_cookie("name", "value")
+    assert str(resp.cookies) == "Set-Cookie: name=value; Path=/"
     resp.set_cookie("name", "other_value")
     assert str(resp.cookies) == "Set-Cookie: name=other_value; Path=/"
 
@@ -777,6 +884,8 @@ def test_response_cookies() -> None:
         "expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"
     )
     assert Matches(expected) == str(resp.cookies)
+    resp.del_cookie("name")
+    assert str(resp.cookies) == Matches(expected)
 
     resp.set_cookie("name", "value", domain="local.host")
     expected = "Set-Cookie: name=value; Domain=local.host; Path=/"
@@ -844,9 +953,17 @@ def test_cookie_set_after_del() -> None:
 def test_set_status_with_reason() -> None:
     resp = StreamResponse()
 
-    resp.set_status(200, "Everithing is fine!")
+    resp.set_status(200, "Everything is fine!")
     assert 200 == resp.status
-    assert "Everithing is fine!" == resp.reason
+    assert "Everything is fine!" == resp.reason
+
+
+def test_set_status_with_empty_reason() -> None:
+    resp = StreamResponse()
+
+    resp.set_status(200, "")
+    assert resp.status == 200
+    assert resp.reason == ""
 
 
 async def test_start_force_close() -> None:
@@ -861,14 +978,14 @@ async def test_start_force_close() -> None:
 
 async def test___repr__() -> None:
     req = make_request("GET", "/path/to")
-    resp = StreamResponse(reason=301)
+    resp = StreamResponse(reason="foo")
     await resp.prepare(req)
-    assert "<StreamResponse 301 GET /path/to >" == repr(resp)
+    assert "<StreamResponse foo GET /path/to >" == repr(resp)
 
 
 def test___repr___not_prepared() -> None:
-    resp = StreamResponse(reason=301)
-    assert "<StreamResponse 301 not prepared>" == repr(resp)
+    resp = StreamResponse(reason="foo")
+    assert "<StreamResponse foo not prepared>" == repr(resp)
 
 
 async def test_keep_alive_http10_default() -> None:
@@ -1055,6 +1172,48 @@ def test_assign_nonstr_text() -> None:
     assert 4 == resp.content_length
 
 
+mpwriter = MultipartWriter(boundary="x")
+mpwriter.append_payload(StringPayload("test"))
+
+
+async def async_iter() -> AsyncIterator[str]:
+    yield "foo"  # pragma: no cover
+
+
+class CustomIO(io.IOBase):
+    def __init__(self):
+        self._lines = [b"", b"", b"test"]
+
+    def read(self, size: int = -1) -> bytes:
+        return self._lines.pop()
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    (
+        ("test", "test"),
+        (CustomIO(), "test"),
+        (io.StringIO("test"), "test"),
+        (io.TextIOWrapper(io.BytesIO(b"test")), "test"),
+        (io.BytesIO(b"test"), "test"),
+        (io.BufferedReader(io.BytesIO(b"test")), "test"),
+        (async_iter(), None),
+        (BodyPartReader("x", CIMultiDictProxy(CIMultiDict()), mock.Mock()), None),
+        (
+            mpwriter,
+            "--x\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 4\r\n\r\ntest",
+        ),
+    ),
+)
+def test_payload_body_get_text(payload, expected: Optional[str]) -> None:
+    resp = Response(body=payload)
+    if expected is None:
+        with pytest.raises(TypeError):
+            resp.text
+    else:
+        assert resp.text == expected
+
+
 def test_response_set_content_length() -> None:
     resp = Response()
     with pytest.raises(RuntimeError):
@@ -1072,7 +1231,6 @@ async def test_send_headers_for_empty_body(buf, writer) -> None:
         Matches(
             "HTTP/1.1 200 OK\r\n"
             "Content-Length: 0\r\n"
-            "Content-Type: application/octet-stream\r\n"
             "Date: .+\r\n"
             "Server: .+\r\n\r\n"
         )
@@ -1101,6 +1259,11 @@ async def test_render_with_body(buf, writer) -> None:
     )
 
 
+async def test_multiline_reason(buf, writer) -> None:
+    with pytest.raises(ValueError, match=r"Reason cannot contain \\n"):
+        Response(reason="Bad\r\nInjected-header: foo")
+
+
 async def test_send_set_cookie_header(buf, writer) -> None:
     resp = Response()
     resp.cookies["name"] = "value"
@@ -1115,7 +1278,6 @@ async def test_send_set_cookie_header(buf, writer) -> None:
             "HTTP/1.1 200 OK\r\n"
             "Content-Length: 0\r\n"
             "Set-Cookie: name=value\r\n"
-            "Content-Type: application/octet-stream\r\n"
             "Date: .+\r\n"
             "Server: .+\r\n\r\n"
         )
@@ -1178,14 +1340,22 @@ def test_content_type_with_set_body() -> None:
     assert resp.content_type == "application/octet-stream"
 
 
-def test_started_when_not_started() -> None:
+def test_prepared_when_not_started() -> None:
     resp = StreamResponse()
     assert not resp.prepared
 
 
-async def test_started_when_started() -> None:
+async def test_prepared_when_started() -> None:
     resp = StreamResponse()
     await resp.prepare(make_request("GET", "/"))
+    assert resp.prepared
+
+
+async def test_prepared_after_eof() -> None:
+    resp = StreamResponse()
+    await resp.prepare(make_request("GET", "/"))
+    await resp.write(b"data")
+    await resp.write_eof()
     assert resp.prepared
 
 
@@ -1309,3 +1479,15 @@ class TestJSONResponse:
     def test_content_type_is_overrideable(self) -> None:
         resp = json_response({"foo": 42}, content_type="application/vnd.json+api")
         assert "application/vnd.json+api" == resp.content_type
+
+
+@pytest.mark.parametrize("loose_header_type", (MultiDict, CIMultiDict, dict))
+async def test_passing_cimultidict_to_web_response_not_mutated(
+    loose_header_type: type,
+) -> None:
+    req = make_request("GET", "/")
+    headers = loose_header_type({})
+    resp = Response(body=b"answer", headers=headers)
+    await resp.prepare(req)
+    assert resp.content_length == 6
+    assert not headers

@@ -1,3 +1,4 @@
+import io
 from unittest import mock
 
 import pytest
@@ -21,11 +22,19 @@ def writer(buf):
     return writer
 
 
-def test_formdata_multipart(buf, writer) -> None:
-    form = FormData()
+def test_formdata_multipart(buf: bytearray) -> None:
+    form = FormData(default_to_multipart=False)
     assert not form.is_multipart
 
     form.add_field("test", b"test", filename="test.txt")
+    assert form.is_multipart
+
+
+def test_form_data_is_multipart_param(buf: bytearray) -> None:
+    form = FormData(default_to_multipart=True)
+    assert form.is_multipart
+
+    form.add_field("test", "test")
     assert form.is_multipart
 
 
@@ -44,6 +53,16 @@ def test_invalid_formdata_params() -> None:
 def test_invalid_formdata_params2() -> None:
     with pytest.raises(TypeError):
         FormData("as")  # 2-char str is not allowed
+
+
+async def test_formdata_textio_charset(buf: bytearray, writer) -> None:
+    form = FormData()
+    body = io.TextIOWrapper(io.BytesIO(b"\xe6\x97\xa5\xe6\x9c\xac"), encoding="utf-8")
+    form.add_field("foo", body, content_type="text/plain; charset=shift-jis")
+    payload = form()
+    await payload.write(writer)
+    assert b"charset=shift-jis" in buf
+    assert b"\x93\xfa\x96{" in buf
 
 
 def test_invalid_formdata_content_type() -> None:

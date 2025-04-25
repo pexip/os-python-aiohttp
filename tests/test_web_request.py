@@ -10,7 +10,6 @@ from multidict import CIMultiDict, CIMultiDictProxy, MultiDict
 from yarl import URL
 
 from aiohttp import HttpVersion
-from aiohttp.helpers import DEBUG
 from aiohttp.http_parser import RawRequestMessage
 from aiohttp.streams import StreamReader
 from aiohttp.test_utils import make_mocked_request
@@ -43,7 +42,10 @@ def test_base_ctor() -> None:
 
     assert "GET" == req.method
     assert HttpVersion(1, 1) == req.version
-    assert req.host == socket.getfqdn()
+    # MacOS may return CamelCased host name, need .lower()
+    # FQDN can be wider than host, e.g.
+    # 'fv-az397-495' in 'fv-az397-495.internal.cloudapp.net'
+    assert req.host.lower() in socket.getfqdn().lower()
     assert "/path/to?a=1&b=2" == req.path_qs
     assert "/path/to" == req.path
     assert "a=1&b=2" == req.query_string
@@ -66,7 +68,9 @@ def test_ctor() -> None:
     assert "GET" == req.method
     assert HttpVersion(1, 1) == req.version
     # MacOS may return CamelCased host name, need .lower()
-    assert req.host.lower() == socket.getfqdn().lower()
+    # FQDN can be wider than host, e.g.
+    # 'fv-az397-495' in 'fv-az397-495.internal.cloudapp.net'
+    assert req.host.lower() in socket.getfqdn().lower()
     assert "/path/to?a=1&b=2" == req.path_qs
     assert "/path/to" == req.path
     assert "a=1&b=2" == req.query_string
@@ -104,7 +108,7 @@ def test_ctor() -> None:
 
 def test_deprecated_message() -> None:
     req = make_mocked_request("GET", "/path/to?a=1&b=2")
-    with pytest.warns(DeprecationWarning):
+    with pytest.deprecated_call(match=r"^Request\.message is deprecated$"):
         assert req.message == req._message
 
 
@@ -163,6 +167,22 @@ def test_absolute_url() -> None:
     assert req.scheme == "https"
     assert req.host == "example.com"
     assert req.rel_url == URL.build(path="/path/to", query={"a": "1"})
+
+
+def test_clone_absolute_scheme() -> None:
+    req = make_mocked_request("GET", "https://example.com/path/to?a=1")
+    assert req.scheme == "https"
+    req2 = req.clone(scheme="http")
+    assert req2.scheme == "http"
+    assert req2.url.scheme == "http"
+
+
+def test_clone_absolute_host() -> None:
+    req = make_mocked_request("GET", "https://example.com/path/to?a=1")
+    assert req.host == "example.com"
+    req2 = req.clone(host="foo.test")
+    assert req2.host == "foo.test"
+    assert req2.url.host == "foo.test"
 
 
 def test_content_length() -> None:
@@ -506,6 +526,16 @@ def test_url_url() -> None:
     assert URL("http://example.com/path") == req.url
 
 
+def test_url_non_default_port() -> None:
+    req = make_mocked_request("GET", "/path", headers={"HOST": "example.com:8123"})
+    assert req.url == URL("http://example.com:8123/path")
+
+
+def test_url_ipv6() -> None:
+    req = make_mocked_request("GET", "/path", headers={"HOST": "[::1]:8123"})
+    assert req.url == URL("http://[::1]:8123/path")
+
+
 def test_clone() -> None:
     req = make_mocked_request("GET", "/path")
     req2 = req.clone()
@@ -518,6 +548,12 @@ def test_clone_client_max_size() -> None:
     req2 = req.clone()
     assert req._client_max_size == req2._client_max_size
     assert req2._client_max_size == 1024
+
+
+def test_clone_override_client_max_size() -> None:
+    req = make_mocked_request("GET", "/path", client_max_size=1024)
+    req2 = req.clone(client_max_size=2048)
+    assert req2.client_max_size == 2048
 
 
 def test_clone_method() -> None:
@@ -602,7 +638,7 @@ async def test_multipart_formdata(protocol) -> None:
         b"-----------------------------326931944431359--\r\n"
     )
     content_type = (
-        "multipart/form-data; boundary=" "---------------------------326931944431359"
+        "multipart/form-data; boundary=---------------------------326931944431359"
     )
     payload.feed_eof()
     req = make_mocked_request(
@@ -623,7 +659,7 @@ async def test_multipart_formdata_file(protocol) -> None:
         b"-----------------------------326931944431359--\r\n"
     )
     content_type = (
-        "multipart/form-data; boundary=" "---------------------------326931944431359"
+        "multipart/form-data; boundary=---------------------------326931944431359"
     )
     payload.feed_eof()
     req = make_mocked_request(
@@ -674,27 +710,25 @@ def test_save_state_on_clone() -> None:
 
 def test_clone_scheme() -> None:
     req = make_mocked_request("GET", "/")
+    assert req.scheme == "http"
     req2 = req.clone(scheme="https")
     assert req2.scheme == "https"
+    assert req2.url.scheme == "https"
 
 
 def test_clone_host() -> None:
     req = make_mocked_request("GET", "/")
+    assert req.host != "example.com"
     req2 = req.clone(host="example.com")
     assert req2.host == "example.com"
+    assert req2.url.host == "example.com"
 
 
 def test_clone_remote() -> None:
     req = make_mocked_request("GET", "/")
+    assert req.remote != "11.11.11.11"
     req2 = req.clone(remote="11.11.11.11")
     assert req2.remote == "11.11.11.11"
-
-
-@pytest.mark.skipif(not DEBUG, reason="The check is applied in DEBUG mode only")
-def test_request_custom_attr() -> None:
-    req = make_mocked_request("GET", "/")
-    with pytest.warns(DeprecationWarning):
-        req.custom = None
 
 
 def test_remote_with_closed_transport() -> None:
@@ -752,7 +786,7 @@ def test_eq() -> None:
 async def test_loop_prop() -> None:
     loop = asyncio.get_event_loop()
     req = make_mocked_request("GET", "/path", loop=loop)
-    with pytest.warns(DeprecationWarning):
+    with pytest.deprecated_call(match=r"^request\.loop property is deprecated$"):
         assert req.loop is loop
 
 

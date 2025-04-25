@@ -3,7 +3,9 @@ import io
 import json
 import pathlib
 import socket
+import sys
 import zlib
+from typing import Any, NoReturn, Optional
 from unittest import mock
 
 import pytest
@@ -11,10 +13,25 @@ from multidict import CIMultiDictProxy, MultiDict
 from yarl import URL
 
 import aiohttp
-from aiohttp import FormData, HttpVersion10, HttpVersion11, TraceConfig, multipart, web
+from aiohttp import (
+    FormData,
+    HttpVersion,
+    HttpVersion10,
+    HttpVersion11,
+    TraceConfig,
+    multipart,
+    web,
+)
 from aiohttp.hdrs import CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING
+from aiohttp.pytest_plugin import AiohttpClient
 from aiohttp.test_utils import make_mocked_coro
 from aiohttp.typedefs import Handler
+from aiohttp.web_protocol import RequestHandler
+
+try:
+    import brotlicffi as brotli
+except ImportError:
+    import brotli
 
 try:
     import ssl
@@ -34,7 +51,8 @@ def fname(here):
 
 def new_dummy_form():
     form = FormData()
-    form.add_field("name", b"123", content_transfer_encoding="base64")
+    with pytest.warns(DeprecationWarning, match="BytesPayload"):
+        form.add_field("name", b"123", content_transfer_encoding="base64")
     return form
 
 
@@ -86,12 +104,8 @@ async def test_handler_returns_not_response(aiohttp_server, aiohttp_client) -> N
     server = await aiohttp_server(app, logger=logger)
     client = await aiohttp_client(server)
 
-    with pytest.raises(aiohttp.ServerDisconnectedError):
-        await client.get("/")
-
-    logger.exception.assert_called_with(
-        "Unhandled runtime exception", exc_info=mock.ANY
-    )
+    async with client.get("/") as resp:
+        assert resp.status == 500
 
 
 async def test_handler_returns_none(aiohttp_server, aiohttp_client) -> None:
@@ -106,13 +120,22 @@ async def test_handler_returns_none(aiohttp_server, aiohttp_client) -> None:
     server = await aiohttp_server(app, logger=logger)
     client = await aiohttp_client(server)
 
-    with pytest.raises(aiohttp.ServerDisconnectedError):
-        await client.get("/")
+    async with client.get("/") as resp:
+        assert resp.status == 500
 
-    # Actual error text is placed in exc_info
-    logger.exception.assert_called_with(
-        "Unhandled runtime exception", exc_info=mock.ANY
-    )
+
+async def test_handler_returns_not_response_after_100expect(
+    aiohttp_server, aiohttp_client
+) -> None:
+    async def handler(request: web.Request) -> NoReturn:
+        raise Exception("foo")
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app)
+
+    async with client.get("/", expect100=True) as resp:
+        assert resp.status == 500
 
 
 async def test_head_returns_empty_body(aiohttp_client) -> None:
@@ -127,9 +150,28 @@ async def test_head_returns_empty_body(aiohttp_client) -> None:
     assert 200 == resp.status
     txt = await resp.text()
     assert "" == txt
+    # The Content-Length header should be set to 4 which is
+    # the length of the response body if it would have been
+    # returned by a GET request.
+    assert resp.headers["Content-Length"] == "4"
 
 
-async def test_response_before_complete(aiohttp_client) -> None:
+@pytest.mark.parametrize("status", (201, 204, 404))
+async def test_default_content_type_no_body(aiohttp_client: Any, status: int) -> None:
+    async def handler(request):
+        return web.Response(status=status)
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app)
+
+    async with client.get("/") as resp:
+        assert resp.status == status
+        assert await resp.read() == b""
+        assert "Content-Type" not in resp.headers
+
+
+async def test_response_before_complete(aiohttp_client: Any) -> None:
     async def handler(request):
         return web.Response(body=b"OK")
 
@@ -147,8 +189,42 @@ async def test_response_before_complete(aiohttp_client) -> None:
     await resp.release()
 
 
-async def test_post_form(aiohttp_client) -> None:
-    async def handler(request):
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="Needs Task.cancelling()")
+async def test_cancel_shutdown(aiohttp_client: AiohttpClient) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        t = asyncio.create_task(request.protocol.shutdown())
+        # Ensure it's started waiting
+        await asyncio.sleep(0)
+
+        t.cancel()
+        # Cancellation should not be suppressed
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+        # Repeat for second waiter in shutdown()
+        with mock.patch.object(request.protocol, "_request_in_progress", False):
+            with mock.patch.object(request.protocol, "_current_request", None):
+                t = asyncio.create_task(request.protocol.shutdown())
+                await asyncio.sleep(0)
+
+                t.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await t
+
+        return web.Response(body=b"OK")
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app)
+
+    async with client.get("/") as resp:
+        assert resp.status == 200
+        txt = await resp.text()
+        assert txt == "OK"
+
+
+async def test_post_form(aiohttp_client: AiohttpClient) -> None:
+    async def handler(request: web.Request) -> web.Response:
         data = await request.post()
         assert {"a": "1", "b": "2", "c": ""} == data
         return web.Response(body=b"OK")
@@ -429,25 +505,6 @@ async def test_release_post_data(aiohttp_client) -> None:
     await resp.release()
 
 
-async def test_POST_DATA_with_content_transfer_encoding(aiohttp_client) -> None:
-    async def handler(request):
-        data = await request.post()
-        assert b"123" == data["name"]
-        return web.Response()
-
-    app = web.Application()
-    app.router.add_post("/", handler)
-    client = await aiohttp_client(app)
-
-    form = FormData()
-    form.add_field("name", b"123", content_transfer_encoding="base64")
-
-    resp = await client.post("/", data=form)
-    assert 200 == resp.status
-
-    await resp.release()
-
-
 async def test_post_form_with_duplicate_keys(aiohttp_client) -> None:
     async def handler(request):
         data = await request.post()
@@ -505,7 +562,8 @@ async def test_100_continue(aiohttp_client) -> None:
         return web.Response()
 
     form = FormData()
-    form.add_field("name", b"123", content_transfer_encoding="base64")
+    with pytest.warns(DeprecationWarning, match="BytesPayload"):
+        form.add_field("name", b"123", content_transfer_encoding="base64")
 
     app = web.Application()
     app.router.add_post("/", handler)
@@ -571,6 +629,32 @@ async def test_100_continue_custom_response(aiohttp_client) -> None:
     await resp.release()
 
 
+async def test_expect_handler_custom_response(aiohttp_client) -> None:
+    cache = {"foo": "bar"}
+
+    async def handler(request: web.Request) -> web.Response:
+        return web.Response(text="handler")
+
+    async def expect_handler(request: web.Request) -> Optional[web.Response]:
+        k = request.headers.get("X-Key")
+        cached_value = cache.get(k)
+        if cached_value:
+            return web.Response(text=cached_value)
+
+    app = web.Application()
+    # expect_handler is only typed on add_route().
+    app.router.add_route("POST", "/", handler, expect_handler=expect_handler)
+    client = await aiohttp_client(app)
+
+    async with client.post("/", expect100=True, headers={"X-Key": "foo"}) as resp:
+        assert resp.status == 200
+        assert await resp.text() == "bar"
+
+    async with client.post("/", expect100=True, headers={"X-Key": "spam"}) as resp:
+        assert resp.status == 200
+        assert await resp.text() == "handler"
+
+
 async def test_100_continue_for_not_found(aiohttp_client) -> None:
 
     app = web.Application()
@@ -612,9 +696,8 @@ async def test_http11_keep_alive_default(aiohttp_client) -> None:
     await resp.release()
 
 
-@pytest.mark.xfail
-async def test_http10_keep_alive_default(aiohttp_client) -> None:
-    async def handler(request):
+async def test_http10_keep_alive_default(aiohttp_client: AiohttpClient) -> None:
+    async def handler(request: web.Request) -> web.Response:
         return web.Response()
 
     app = web.Application()
@@ -683,7 +766,7 @@ async def test_upload_file(aiohttp_client) -> None:
     app.router.add_post("/", handler)
     client = await aiohttp_client(app)
 
-    resp = await client.post("/", data={"file": data})
+    resp = await client.post("/", data={"file": io.BytesIO(data)})
     assert 200 == resp.status
 
     await resp.release()
@@ -1051,53 +1134,22 @@ async def test_response_with_payload_stringio(aiohttp_client, fname) -> None:
     await resp.release()
 
 
-async def test_response_with_precompressed_body_gzip(aiohttp_client) -> None:
-    async def handler(request):
-        headers = {"Content-Encoding": "gzip"}
-        zcomp = zlib.compressobj(wbits=16 + zlib.MAX_WBITS)
-        data = zcomp.compress(b"mydata") + zcomp.flush()
-        return web.Response(body=data, headers=headers)
-
-    app = web.Application()
-    app.router.add_get("/", handler)
-    client = await aiohttp_client(app)
-
-    resp = await client.get("/")
-    assert 200 == resp.status
-    data = await resp.read()
-    assert b"mydata" == data
-    assert resp.headers.get("Content-Encoding") == "gzip"
-
-    await resp.release()
-
-
-async def test_response_with_precompressed_body_deflate(aiohttp_client) -> None:
-    async def handler(request):
-        headers = {"Content-Encoding": "deflate"}
-        zcomp = zlib.compressobj(wbits=zlib.MAX_WBITS)
-        data = zcomp.compress(b"mydata") + zcomp.flush()
-        return web.Response(body=data, headers=headers)
-
-    app = web.Application()
-    app.router.add_get("/", handler)
-    client = await aiohttp_client(app)
-
-    resp = await client.get("/")
-    assert 200 == resp.status
-    data = await resp.read()
-    assert b"mydata" == data
-    assert resp.headers.get("Content-Encoding") == "deflate"
-
-    await resp.release()
-
-
-async def test_response_with_precompressed_body_deflate_no_hdrs(aiohttp_client) -> None:
-    async def handler(request):
-        headers = {"Content-Encoding": "deflate"}
+@pytest.mark.parametrize(
+    "compressor,encoding",
+    [
+        (zlib.compressobj(wbits=16 + zlib.MAX_WBITS), "gzip"),
+        (zlib.compressobj(wbits=zlib.MAX_WBITS), "deflate"),
         # Actually, wrong compression format, but
         # should be supported for some legacy cases.
-        zcomp = zlib.compressobj(wbits=-zlib.MAX_WBITS)
-        data = zcomp.compress(b"mydata") + zcomp.flush()
+        (zlib.compressobj(wbits=-zlib.MAX_WBITS), "deflate"),
+    ],
+)
+async def test_response_with_precompressed_body(
+    aiohttp_client, compressor, encoding
+) -> None:
+    async def handler(request):
+        headers = {"Content-Encoding": encoding}
+        data = compressor.compress(b"mydata") + compressor.flush()
         return web.Response(body=data, headers=headers)
 
     app = web.Application()
@@ -1108,7 +1160,27 @@ async def test_response_with_precompressed_body_deflate_no_hdrs(aiohttp_client) 
     assert 200 == resp.status
     data = await resp.read()
     assert b"mydata" == data
-    assert resp.headers.get("Content-Encoding") == "deflate"
+    assert resp.headers.get("Content-Encoding") == encoding
+
+    await resp.release()
+
+
+async def test_response_with_precompressed_body_brotli(aiohttp_client) -> None:
+    async def handler(request):
+        headers = {"Content-Encoding": "br"}
+        return web.Response(body=brotli.compress(b"mydata"), headers=headers)
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/")
+    assert 200 == resp.status
+    data = await resp.read()
+    assert b"mydata" == data
+    assert resp.headers.get("Content-Encoding") == "br"
+
+    await resp.release()
 
 
 async def test_bad_request_payload(aiohttp_client) -> None:
@@ -1534,26 +1606,27 @@ async def test_subapp_middleware_context(aiohttp_client, route, expected, middle
     def show_app_context(appname):
         @web.middleware
         async def middleware(request, handler: Handler):
-            values.append("{}: {}".format(appname, request.app["my_value"]))
+            values.append(f"{appname}: {request.app[my_value]}")
             return await handler(request)
 
         return middleware
 
     def make_handler(appname):
         async def handler(request):
-            values.append("{}: {}".format(appname, request.app["my_value"]))
+            values.append(f"{appname}: {request.app[my_value]}")
             return web.Response(text="Ok")
 
         return handler
 
     app = web.Application()
-    app["my_value"] = "root"
+    my_value = web.AppKey("my_value", str)
+    app[my_value] = "root"
     if "A" in middlewares:
         app.middlewares.append(show_app_context("A"))
     app.router.add_get("/", make_handler("B"))
 
     subapp = web.Application()
-    subapp["my_value"] = "sub"
+    subapp[my_value] = "sub"
     if "C" in middlewares:
         subapp.middlewares.append(show_app_context("C"))
     subapp.router.add_get("/", make_handler("D"))
@@ -1614,9 +1687,7 @@ async def test_app_max_client_size(aiohttp_client) -> None:
         resp = await client.post("/", data=data)
     assert 413 == resp.status
     resp_text = await resp.text()
-    assert (
-        "Maximum request body size 1048576 exceeded, " "actual body size" in resp_text
-    )
+    assert "Maximum request body size 1048576 exceeded, actual body size" in resp_text
     # Maximum request body size X exceeded, actual body size X
     body_size = int(resp_text.split()[-1])
     assert body_size >= max_size
@@ -1648,9 +1719,7 @@ async def test_app_max_client_size_adjusted(aiohttp_client) -> None:
         resp = await client.post("/", data=too_large_data)
     assert 413 == resp.status
     resp_text = await resp.text()
-    assert (
-        "Maximum request body size 2097152 exceeded, " "actual body size" in resp_text
-    )
+    assert "Maximum request body size 2097152 exceeded, actual body size" in resp_text
     # Maximum request body size X exceeded, actual body size X
     body_size = int(resp_text.split()[-1])
     assert body_size >= custom_max_size
@@ -1752,7 +1821,7 @@ async def test_response_with_bodypart(aiohttp_client) -> None:
         await resp.release()
 
 
-async def test_response_with_bodypart_named(aiohttp_client, tmpdir) -> None:
+async def test_response_with_bodypart_named(aiohttp_client, tmp_path) -> None:
     async def handler(request):
         reader = await request.multipart()
         part = await reader.next()
@@ -1762,9 +1831,9 @@ async def test_response_with_bodypart_named(aiohttp_client, tmpdir) -> None:
     app.router.add_post("/", handler)
     client = await aiohttp_client(app)
 
-    f = tmpdir.join("foobar.txt")
+    f = tmp_path / "foobar.txt"
     f.write_text("test", encoding="utf8")
-    with open(str(f), "rb") as fd:
+    with f.open("rb") as fd:
         data = {"file": fd}
         resp = await client.post("/", data=data)
 
@@ -1821,7 +1890,9 @@ async def test_await(aiohttp_server) -> None:
     async def handler(request):
         resp = web.StreamResponse(headers={"content-length": str(4)})
         await resp.prepare(request)
-        with pytest.warns(DeprecationWarning):
+        with pytest.deprecated_call(
+            match=r"^drain method is deprecated, use await resp\.write\(\)$",
+        ):
             await resp.drain()
         await asyncio.sleep(0.01)
         await resp.write(b"test")
@@ -1853,7 +1924,6 @@ async def test_response_context_manager(aiohttp_server) -> None:
     resp = await session.get(server.make_url("/"))
     async with resp:
         assert resp.status == 200
-        assert resp.connection is None
     assert resp.connection is None
 
     await session.close()
@@ -1900,7 +1970,9 @@ async def test_context_manager_close_on_release(aiohttp_server, mocker) -> None:
     async def handler(request):
         resp = web.StreamResponse()
         await resp.prepare(request)
-        with pytest.warns(DeprecationWarning):
+        with pytest.deprecated_call(
+            match=r"^drain method is deprecated, use await resp\.write\(\)$",
+        ):
             await resp.drain()
         await asyncio.sleep(10)
         return resp
@@ -1918,6 +1990,8 @@ async def test_context_manager_close_on_release(aiohttp_server, mocker) -> None:
             assert resp.connection is not None
         assert resp.connection is None
         assert proto.close.called
+
+        await resp.release()  # Trigger handler completion
 
 
 async def test_iter_any(aiohttp_server) -> None:
@@ -2169,3 +2243,122 @@ async def test_stream_response_headers_204(aiohttp_client):
     assert CONTENT_TYPE not in resp.headers
     assert TRANSFER_ENCODING not in resp.headers
     await resp.release()
+
+
+async def test_httpfound_cookies_302(aiohttp_client: Any) -> None:
+    async def handler(_):
+        resp = web.HTTPFound("/")
+        resp.set_cookie("my-cookie", "cookie-value")
+        raise resp
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/", allow_redirects=False)
+    assert "my-cookie" in resp.cookies
+    await resp.release()
+
+
+@pytest.mark.parametrize("status", (101, 204, 304))
+@pytest.mark.parametrize("version", (HttpVersion10, HttpVersion11))
+async def test_no_body_for_1xx_204_304_responses(
+    aiohttp_client: Any, status: int, version: HttpVersion
+) -> None:
+    """Test no body is present for for 1xx, 204, and 304 responses."""
+
+    async def handler(_):
+        return web.Response(status=status, body=b"should not get to client")
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    client = await aiohttp_client(app, version=version)
+    resp = await client.get("/")
+    assert CONTENT_TYPE not in resp.headers
+    assert TRANSFER_ENCODING not in resp.headers
+    await resp.read() == b""
+    await resp.release()
+
+
+async def test_keepalive_race_condition(aiohttp_client: Any) -> None:
+    protocol = None
+    orig_data_received = RequestHandler.data_received
+
+    def delay_received(self, data: bytes) -> None:
+        """Emulate race condition.
+
+        The keepalive callback needs to be called between data_received() and
+        when start() resumes from the waiter set within data_received().
+        """
+        data = orig_data_received(self, data)
+        if protocol is None:  # First request creating the keepalive connection.
+            return data
+
+        assert self is protocol
+        assert protocol._keepalive_handle is not None
+        # Cancel existing callback that would run at some point in future.
+        protocol._keepalive_handle.cancel()
+        protocol._keepalive_handle = None
+
+        # Set next run time into the past and run callback manually.
+        protocol._next_keepalive_close_time = asyncio.get_running_loop().time() - 1
+        protocol._process_keepalive()
+
+        return data
+
+    async def handler(request: web.Request) -> web.Response:
+        nonlocal protocol
+        protocol = request.protocol
+        return web.Response()
+
+    target = "aiohttp.web_protocol.RequestHandler.data_received"
+    with mock.patch(target, delay_received):
+        app = web.Application()
+        app.router.add_get("/", handler)
+        client = await aiohttp_client(app)
+
+        # Open connection, so we have a keepalive connection and reference to protocol.
+        async with client.get("/") as resp:
+            assert resp.status == 200
+        assert protocol is not None
+        # Make 2nd request which will hit the race condition.
+        async with client.get("/") as resp:
+            assert resp.status == 200
+
+
+async def test_keepalive_expires_on_time(aiohttp_client: AiohttpClient) -> None:
+    """Test that the keepalive handle expires on time."""
+
+    async def handler(request: web.Request) -> web.Response:
+        body = await request.read()
+        assert b"" == body
+        return web.Response(body=b"OK")
+
+    app = web.Application()
+    app.router.add_route("GET", "/", handler)
+
+    connector = aiohttp.TCPConnector(limit=1)
+    client = await aiohttp_client(app, connector=connector)
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+
+    # Patch loop time so we can control when the keepalive timeout is processed
+    with mock.patch.object(loop, "time") as loop_time_mock:
+        loop_time_mock.return_value = now
+        resp1 = await client.get("/")
+        await resp1.read()
+        request_handler = client.server.handler.connections[0]
+
+        # Ensure the keep alive handle is set
+        assert request_handler._keepalive_handle is not None
+
+        # Set the loop time to exactly the keepalive timeout
+        loop_time_mock.return_value = request_handler._next_keepalive_close_time
+
+        # sleep twice to ensure the keep alive timeout is processed
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        # Ensure the keep alive handle expires
+        assert request_handler._keepalive_handle is None
