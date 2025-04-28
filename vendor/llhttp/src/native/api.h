@@ -7,6 +7,8 @@ extern "C" {
 
 #if defined(__wasm__)
 #define LLHTTP_EXPORT __attribute__((visibility("default")))
+#elif defined(_WIN32)
+#define LLHTTP_EXPORT __declspec(dllexport)
 #else
 #define LLHTTP_EXPORT
 #endif
@@ -24,8 +26,12 @@ struct llhttp_settings_s {
   /* Possible return values 0, -1, HPE_USER */
   llhttp_data_cb on_url;
   llhttp_data_cb on_status;
+  llhttp_data_cb on_method;
+  llhttp_data_cb on_version;
   llhttp_data_cb on_header_field;
   llhttp_data_cb on_header_value;
+  llhttp_data_cb      on_chunk_extension_name;
+  llhttp_data_cb      on_chunk_extension_value;
 
   /* Possible return values:
    * 0  - Proceed normally
@@ -43,6 +49,14 @@ struct llhttp_settings_s {
 
   /* Possible return values 0, -1, `HPE_PAUSED` */
   llhttp_cb      on_message_complete;
+  llhttp_cb      on_url_complete;
+  llhttp_cb      on_status_complete;
+  llhttp_cb      on_method_complete;
+  llhttp_cb      on_version_complete;
+  llhttp_cb      on_header_field_complete;
+  llhttp_cb      on_header_value_complete;
+  llhttp_cb      on_chunk_extension_name_complete;
+  llhttp_cb      on_chunk_extension_value_complete;
 
   /* When on_chunk_header is called, the current chunk length is stored
    * in parser->content_length.
@@ -50,12 +64,7 @@ struct llhttp_settings_s {
    */
   llhttp_cb      on_chunk_header;
   llhttp_cb      on_chunk_complete;
-
-  /* Information-only callbacks, return value is ignored */
-  llhttp_cb      on_url_complete;
-  llhttp_cb      on_status_complete;
-  llhttp_cb      on_header_field_complete;
-  llhttp_cb      on_header_value_complete;
+  llhttp_cb      on_reset;
 };
 
 /* Initialize the parser with specific type and user settings.
@@ -67,8 +76,6 @@ struct llhttp_settings_s {
 LLHTTP_EXPORT
 void llhttp_init(llhttp_t* parser, llhttp_type_t type,
                  const llhttp_settings_t* settings);
-
-#if defined(__wasm__)
 
 LLHTTP_EXPORT
 llhttp_t* llhttp_alloc(llhttp_type_t type);
@@ -93,8 +100,6 @@ int llhttp_get_status_code(llhttp_t* parser);
 
 LLHTTP_EXPORT
 uint8_t llhttp_get_upgrade(llhttp_t* parser);
-
-#endif  // defined(__wasm__)
 
 /* Reset an already initialized parser back to the start state, preserving the
  * existing parser type, callback settings, user data, and lenient flags.
@@ -209,6 +214,9 @@ const char* llhttp_errno_name(llhttp_errno_t err);
 LLHTTP_EXPORT
 const char* llhttp_method_name(llhttp_method_t method);
 
+/* Returns textual name of HTTP status */
+LLHTTP_EXPORT
+const char* llhttp_status_name(llhttp_status_t status);
 
 /* Enables/disables lenient header value parsing (disabled by default).
  *
@@ -217,7 +225,8 @@ const char* llhttp_method_name(llhttp_method_t method);
  * `HPE_INVALID_HEADER_TOKEN` will be raised for incorrect header values when
  * lenient parsing is "on".
  *
- * **(USE AT YOUR OWN RISK)**
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
  */
 LLHTTP_EXPORT
 void llhttp_set_lenient_headers(llhttp_t* parser, int enabled);
@@ -231,7 +240,8 @@ void llhttp_set_lenient_headers(llhttp_t* parser, int enabled);
  * request smuggling, but may be less desirable for small number of cases
  * involving legacy servers.
  *
- * **(USE AT YOUR OWN RISK)**
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
  */
 LLHTTP_EXPORT
 void llhttp_set_lenient_chunked_length(llhttp_t* parser, int enabled);
@@ -246,9 +256,100 @@ void llhttp_set_lenient_chunked_length(llhttp_t* parser, int enabled);
  * but might interact badly with outdated and insecure clients. With this flag
  * the extra request/response will be parsed normally.
  *
- * **(USE AT YOUR OWN RISK)**
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * poisoning attacks. USE WITH CAUTION!**
  */
+LLHTTP_EXPORT
 void llhttp_set_lenient_keep_alive(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of `Transfer-Encoding` header.
+ *
+ * Normally `llhttp` would error when a `Transfer-Encoding` has `chunked` value
+ * and another value after it (either in a single header or in multiple
+ * headers whose value are internally joined using `, `).
+ * This is mandated by the spec to reliably determine request body size and thus
+ * avoid request smuggling.
+ * With this flag the extra value will be parsed normally.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_transfer_encoding(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of HTTP version.
+ *
+ * Normally `llhttp` would error when the HTTP version in the request or status line
+ * is not `0.9`, `1.0`, `1.1` or `2.0`.
+ * With this flag the invalid value will be parsed normally.
+ *
+ * **Enabling this flag can pose a security issue since you will allow unsupported
+ * HTTP versions. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_version(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of additional data received after a message ends
+ * and keep-alive is disabled.
+ *
+ * Normally `llhttp` would error when additional unexpected data is received if the message
+ * contains the `Connection` header with `close` value.
+ * With this flag the extra data will discarded without throwing an error.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * poisoning attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_data_after_close(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of incomplete CRLF sequences.
+ *
+ * Normally `llhttp` would error when a CR is not followed by LF when terminating the
+ * request line, the status line, the headers or a chunk header.
+ * With this flag only a CR is required to terminate such sections.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_optional_lf_after_cr(llhttp_t* parser, int enabled);
+
+/*
+ * Enables/disables lenient handling of line separators.
+ *
+ * Normally `llhttp` would error when a LF is not preceded by CR when terminating the
+ * request line, the status line, the headers, a chunk header or a chunk data.
+ * With this flag only a LF is required to terminate such sections.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_optional_cr_before_lf(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of chunks not separated via CRLF.
+ *
+ * Normally `llhttp` would error when after a chunk data a CRLF is missing before
+ * starting a new chunk.
+ * With this flag the new chunk can start immediately after the previous one.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_optional_crlf_after_chunk(llhttp_t* parser, int enabled);
+
+/* Enables/disables lenient handling of spaces after chunk size.
+ *
+ * Normally `llhttp` would error when after a chunk size is followed by one or more
+ * spaces are present instead of a CRLF or `;`.
+ * With this flag this check is disabled.
+ *
+ * **Enabling this flag can pose a security issue since you will be exposed to
+ * request smuggling attacks. USE WITH CAUTION!**
+ */
+LLHTTP_EXPORT
+void llhttp_set_lenient_spaces_after_chunk_size(llhttp_t* parser, int enabled);
 
 #ifdef __cplusplus
 }  /* extern "C" */

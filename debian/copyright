@@ -6,17 +6,10 @@ Files: *
 Copyright: 2013-2019 Nikolay Kim and Andrew Svetlov
 License: Apache-2
 
-Files: vendor/http-parser/*
-Copyright: Copyright Joyent, Inc. and other Node contributors.
-License: Expat
-
-Files: vendor/http-parser/bench.c
-Copyright: Copyright Fedor Indutny. All rights reserved.
-License: Expat
-
 Files: debian/*
-Copyright: 2015 Tianon Gravi <admwiggin@gmail.com>,
-           2015-2018 Piotr Ożarowski <piotr@debian.org>
+Copyright: 2015 Tianon Gravi <admwiggin@gmail.com>
+           2015-2023 Piotr Ożarowski <piotr@debian.org>
+           2025 Edward Betts <edward@4angle.com>
 License: Apache-2
 
 License: Apache-2

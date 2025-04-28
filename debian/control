@@ -9,14 +9,19 @@ XSBC-Pexip-Original-Uploaders: Tianon Gravi <admwiggin@gmail.com>,
            William Grzybowski <william@grzy.org>
 Build-Depends: debhelper-compat (= 13),
                dh-python,
+               pybuild-plugin-pyproject,
                python3-all-dev,
                python3-setuptools,
                python3-sphinx,
                python3-multidict,
                python3-async-timeout,
-               python3-yarl,
+               python3-yarl (>= 1.18.3),
                cython3,
                python3-aiosignal,
+               python3-aiodns (>= 3.2.0),
+               python3-attr,
+               python3-frozenlist,
+               python3-aiohappyeyeballs,
 # for tests:
                python3-pytest,
                python3-pytest-mock,
@@ -24,9 +29,13 @@ Build-Depends: debhelper-compat (= 13),
                python3-charset-normalizer,
                python3-gunicorn,
 # for documentation:
+               python-pytest-doc,
+               python-yarl-doc,
+               python3-alabaster,
+               python3-doc,
                python3-sphinxcontrib.blockdiag
 Rules-Requires-Root: no
-Standards-Version: 4.6.2
+Standards-Version: 4.7.2
 Homepage: https://aiohttp.readthedocs.org
 Vcs-Git: https://salsa.debian.org/python-team/packages/python-aiohttp.git
 Vcs-Browser: https://salsa.debian.org/python-team/packages/python-aiohttp
@@ -36,7 +45,7 @@ XS-Pexip-Upstream: http://deb.debian.org/debian/ trixie
 Package: python3-aiohttp
 Architecture: any
 Depends: python3-yarl, python3-async-timeout (>= 4.0.1), ${misc:Depends}, ${python3:Depends}, ${shlibs:Depends}, ${sphinxdoc:Depends}
-Recommends: libjs-jquery
+Recommends: libjs-jquery, python3-aiodns
 Description: http client/server for asyncio
  HTTP Client for asyncio (PEP 3156 - Asynchronous I/O Support).
  .

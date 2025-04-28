@@ -15,6 +15,8 @@ Content-Length: 0
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=17 len=7 span[header_field]="Header1"
@@ -37,7 +39,7 @@ off=73 message complete
 
 Every response must start with `HTTP/`.
 
-<!-- meta={"type": "response-only"} -->
+<!-- meta={"type": "response"} -->
 ```http
 HTTPER/1.1 200 OK
 
@@ -60,6 +62,8 @@ HTTP/1.1 200 OK
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=19 headers complete status=200 v=1/1 flags=0 content_length=0
@@ -90,6 +94,8 @@ _(Note the `$` char in header field)_
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=17 span[status]="Moved Permanently"
 off=32 status complete
 off=32 len=8 span[header_field]="Location"
@@ -163,6 +169,8 @@ Transfer-Encoding: chunked
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=16 span[status]="MovedPermanently"
 off=31 status complete
 off=31 len=4 span[header_field]="Date"
@@ -221,6 +229,8 @@ HTTP/1.1 404 Not Found
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=9 span[status]="Not Found"
 off=24 status complete
 off=26 headers complete status=404 v=1/1 flags=0 content_length=0
@@ -237,6 +247,8 @@ HTTP/1.1 301
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=14 status complete
 off=16 headers complete status=301 v=1/1 flags=0 content_length=0
 ```
@@ -252,6 +264,9 @@ HTTP/1.1 200 \r\n\
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
+off=13 len=0 span[status]=""
 off=15 status complete
 off=17 headers complete status=200 v=1/1 flags=0 content_length=0
 ```
@@ -269,6 +284,27 @@ these headers are from http://news.ycombinator.com/
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
+off=13 len=2 span[status]="OK"
+off=16 error code=25 reason="Missing expected CR after response line"
+```
+
+## No carriage ret (lenient)
+
+<!-- meta={"type": "response-lenient-optional-cr-before-lf"} -->
+```http
+HTTP/1.1 200 OK\n\
+Content-Type: text/html; charset=utf-8\n\
+Connection: close\n\
+\n\
+these headers are from http://news.ycombinator.com/
+```
+
+```log
+off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=16 status complete
 off=16 len=12 span[header_field]="Content-Type"
@@ -300,6 +336,8 @@ DCLK_imp: v7;x;114750856;0-0;0;17820020;0/0;21603567/21621457/1;;~okv=;dcmt=text
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=17 len=6 span[header_field]="Server"
@@ -345,6 +383,8 @@ Connection: keep-alive
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.0"
+off=8 version complete
 off=13 len=17 span[status]="Moved Permanently"
 off=32 status complete
 off=32 len=4 span[header_field]="Date"
@@ -411,6 +451,8 @@ Connection: close
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=17 len=4 span[header_field]="Date"
@@ -463,9 +505,9 @@ off=370 chunk complete
 off=370 message complete
 ```
 
-## Spaces in header name in strict mode
+## Spaces in header name
 
-<!-- meta={"type": "response", "mode": "strict", "noScan": true} -->
+<!-- meta={"type": "response",  "noScan": true} -->
 ```http
 HTTP/1.1 200 OK
 Server: Microsoft-IIS/6.0
@@ -481,6 +523,8 @@ Connection: keep-alive
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=17 len=6 span[header_field]="Server"
@@ -492,61 +536,6 @@ off=57 header_field complete
 off=58 len=7 span[header_value]="ASP.NET"
 off=67 header_value complete
 off=72 error code=10 reason="Invalid header token"
-```
-
-## Spaces in header name in loose mode
-
-`en-US Content-Type` must be treated as a header name
-
-<!-- meta={"type": "response", "mode": "loose"} -->
-```http
-HTTP/1.1 200 OK
-Server: Microsoft-IIS/6.0
-X-Powered-By: ASP.NET
-en-US Content-Type: text/xml
-Content-Type: text/xml
-Content-Length: 16
-Date: Fri, 23 Jul 2010 18:45:38 GMT
-Connection: keep-alive
-
-<xml>hello</xml>
-```
-
-```log
-off=0 message begin
-off=13 len=2 span[status]="OK"
-off=17 status complete
-off=17 len=6 span[header_field]="Server"
-off=24 header_field complete
-off=25 len=17 span[header_value]="Microsoft-IIS/6.0"
-off=44 header_value complete
-off=44 len=12 span[header_field]="X-Powered-By"
-off=57 header_field complete
-off=58 len=7 span[header_value]="ASP.NET"
-off=67 header_value complete
-off=67 len=18 span[header_field]="en-US Content-Type"
-off=86 header_field complete
-off=87 len=8 span[header_value]="text/xml"
-off=97 header_value complete
-off=97 len=12 span[header_field]="Content-Type"
-off=110 header_field complete
-off=111 len=8 span[header_value]="text/xml"
-off=121 header_value complete
-off=121 len=14 span[header_field]="Content-Length"
-off=136 header_field complete
-off=137 len=2 span[header_value]="16"
-off=141 header_value complete
-off=141 len=4 span[header_field]="Date"
-off=146 header_field complete
-off=147 len=29 span[header_value]="Fri, 23 Jul 2010 18:45:38 GMT"
-off=178 header_value complete
-off=178 len=10 span[header_field]="Connection"
-off=189 header_field complete
-off=190 len=10 span[header_value]="keep-alive"
-off=202 header_value complete
-off=204 headers complete status=200 v=1/1 flags=21 content_length=16
-off=204 len=16 span[body]="<xml>hello</xml>"
-off=220 message complete
 ```
 
 ## Non ASCII in status line
@@ -563,6 +552,8 @@ Connection: close
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=19 span[status]="Oriëntatieprobleem"
 off=34 status complete
 off=34 len=4 span[header_field]="Date"
@@ -592,6 +583,8 @@ HTTP/0.9 200 OK
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="0.9"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=19 headers complete status=200 v=0/9 flags=0 content_length=0
@@ -613,6 +606,8 @@ hello world
 
 ```log
 off=0 message begin
+off=5 len=3 span[version]="1.1"
+off=8 version complete
 off=13 len=2 span[status]="OK"
 off=17 status complete
 off=17 len=12 span[header_field]="Content-Type"
@@ -637,6 +632,8 @@ Content-Length: 0
 
 ```log
 off=2 message begin
+off=7 len=3 span[version]="1.1"
+off=10 version complete
 off=15 len=2 span[status]="OK"
 off=19 status complete
 off=19 len=7 span[header_field]="Header1"

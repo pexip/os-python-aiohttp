@@ -1,3 +1,149 @@
+python-aiohttp (3.11.16-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Sat, 05 Apr 2025 14:44:31 +0200
+
+python-aiohttp (3.11.15-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+  * Now requires a newer version of yarl.
+  * Update patches.
+  * Update Standards-Version.
+
+ -- Edward Betts <edward@4angle.com>  Tue, 01 Apr 2025 11:18:04 +0100
+
+python-aiohttp (3.10.11-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release:
+    - CVE-2024-52303: Fix system routes polluting the middleware cache
+      (closes: #1088108).
+    - CVE-2024-52304: Fix incorrect parsing of chunk extensions with the
+      pure Python parser (closes: #1088109).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 30 Dec 2024 00:23:32 +0000
+
+python-aiohttp (3.10.10-2) unstable; urgency=medium
+
+  * Team upload.
+  * (Build-)depend on python3-yarl (>= 1.12.0) (closes: #1086658).
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 13 Nov 2024 14:31:21 +0000
+
+python-aiohttp (3.10.10-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Tue, 29 Oct 2024 12:17:05 +0100
+
+python-aiohttp (3.10.8-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Tue, 01 Oct 2024 16:05:56 +0200
+
+python-aiohttp (3.10.6-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Fri, 27 Sep 2024 16:27:09 +0200
+
+python-aiohttp (3.10.5-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Sat, 24 Aug 2024 09:30:57 +0200
+
+python-aiohttp (3.10.4-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 19 Aug 2024 11:36:35 +0100
+
+python-aiohttp (3.10.3-3) unstable; urgency=medium
+
+  * Team upload.
+  * Use local Sphinx inventories where available; ignore other missing
+    references.
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 18 Aug 2024 13:50:33 +0100
+
+python-aiohttp (3.10.3-2) unstable; urgency=medium
+
+  * Team upload.
+  * Upload to unstable.
+
+ -- Colin Watson <cjwatson@debian.org>  Thu, 15 Aug 2024 16:45:04 +0100
+
+python-aiohttp (3.10.3-1) experimental; urgency=medium
+
+  * Rework build to avoid needing to filter out *.egg-info from upstream.
+  * Fix documentation build.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 14 Aug 2024 18:19:39 +0100
+
+python-aiohttp (3.10.1-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 05 Aug 2024 15:14:44 +0100
+
+python-aiohttp (3.10.0-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 04 Aug 2024 19:05:16 +0100
+
+python-aiohttp (3.9.5-1) unstable; urgency=medium
+
+  * Team upload.
+  * Use pybuild-plugin-pyproject.
+  * New upstream release:
+    - CVE-2024-23829: Python HTTP parser still overly lenient about
+      separators (closes: #1062708).
+    - CVE-2024-23334: aiohttp.web.static(follow_symlinks=True) is vulnerable
+      to directory traversal (closes: #1062709).
+    - CVE-2024-30251: DoS when trying to parse malformed POST requests
+      (closes: #1070364).
+    - CVE-2024-27306: XSS on index pages for static file handling (closes:
+      #1070665).
+  * Standards-Version: 3.7.0 (no changes required).
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 16 Jun 2024 12:39:52 +0100
+
+python-aiohttp (3.9.1-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream version 3.9.1
+    - CVE-2023-49081 (aiohttp's ClientSession is vulnerable to CRLF
+      injection via version) (Closes: #1057163)
+    - CVE-2023-49082 (aiohttp's ClientSession is vulnerable to CRLF
+      injection via method) (Closes: #1057164)
+    - Fix ftbfs on python3.12 (Closes: #1056036)
+  * Update debian/patches
+  * Update debian/copyright
+  * Clean built docs (Closes: #1047256)
+
+ -- Bo YU <tsu.yubo@gmail.com>  Wed, 13 Dec 2023 10:32:49 +0800
+
+python-aiohttp (3.8.6-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Sat, 14 Oct 2023 13:12:38 +0200
+
+python-aiohttp (3.8.5-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Sun, 20 Aug 2023 14:19:30 +0200
+
 python-aiohttp (3.8.4-1+pexip24u5+deb12u1) pexip; urgency=medium
 
   * New upstream release

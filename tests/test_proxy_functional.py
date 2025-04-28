@@ -1,8 +1,8 @@
 import asyncio
-import functools
 import os
 import pathlib
-import platform
+import ssl
+import sys
 from re import match as match_regex
 from unittest import mock
 from uuid import uuid4
@@ -13,35 +13,10 @@ from yarl import URL
 
 import aiohttp
 from aiohttp import web
-from aiohttp.client_exceptions import ClientConnectionError, ClientProxyConnectionError
-from aiohttp.helpers import IS_MACOS, IS_WINDOWS, PY_37, PY_310
+from aiohttp.client_exceptions import ClientConnectionError
+from aiohttp.helpers import IS_MACOS, IS_WINDOWS
 
-pytestmark = [
-    pytest.mark.filterwarnings(
-        "ignore:unclosed <socket.socket fd=.*:ResourceWarning",
-    ),
-    pytest.mark.filterwarnings(
-        "ignore:"
-        "unclosed transport <_SelectorSocketTransport closing fd=.*"
-        ":ResourceWarning",
-    ),
-]
-
-
-secure_proxy_xfail_under_py310_linux = functools.partial(
-    pytest.mark.xfail,
-    PY_310 and platform.system() == "Linux",
-    reason=(
-        "The secure proxy fixture does not seem to work "
-        "under Python 3.10 on Linux. "
-        "See https://github.com/abhinavsingh/proxy.py/issues/622."
-    ),
-)
-
-ASYNCIO_SUPPORTS_TLS_IN_TLS = hasattr(
-    asyncio.sslproto._SSLProtocolTransport,
-    "_start_tls_compatible",
-)
+ASYNCIO_SUPPORTS_TLS_IN_TLS = sys.version_info >= (3, 11)
 
 
 @pytest.fixture
@@ -51,6 +26,9 @@ def secure_proxy_url(tls_certificate_pem_path):
     This fixture also spawns that instance and tears it down after the test.
     """
     proxypy_args = [
+        # --threadless does not work on windows, see
+        # https://github.com/abhinavsingh/proxy.py/issues/492
+        "--threaded" if os.name == "nt" else "--threadless",
         "--num-workers",
         "1",  # the tests only send one query anyway
         "--hostname",
@@ -112,79 +90,55 @@ async def web_server_endpoint_url(
     )
 
 
-@pytest.fixture
-def _pretend_asyncio_supports_tls_in_tls(
-    monkeypatch,
-    web_server_endpoint_type,
-):
-    if web_server_endpoint_type != "https" or ASYNCIO_SUPPORTS_TLS_IN_TLS:
-        return
-
-    # for https://github.com/python/cpython/pull/28073
-    # and https://bugs.python.org/issue37179
-    monkeypatch.setattr(
-        asyncio.sslproto._SSLProtocolTransport,
-        "_start_tls_compatible",
-        True,
-        raising=False,
-    )
-
-
-@secure_proxy_xfail_under_py310_linux(raises=ClientProxyConnectionError)
-@pytest.mark.parametrize(
-    "web_server_endpoint_type",
-    (
-        "http",
-        pytest.param(
-            "https",
-            marks=pytest.mark.xfail(
-                not PY_37,
-                raises=RuntimeError,
-                reason="`asyncio.loop.start_tls()` is only implemeneted in Python 3.7",
-            ),
-        ),
-    ),
+@pytest.mark.skipif(
+    not ASYNCIO_SUPPORTS_TLS_IN_TLS,
+    reason="asyncio on this python does not support TLS in TLS",
 )
-@pytest.mark.usefixtures("_pretend_asyncio_supports_tls_in_tls", "loop")
+@pytest.mark.parametrize("web_server_endpoint_type", ("http", "https"))
+@pytest.mark.filterwarnings(r"ignore:.*ssl.OP_NO_SSL*")
+# Filter out the warning from
+# https://github.com/abhinavsingh/proxy.py/blob/30574fd0414005dfa8792a6e797023e862bdcf43/proxy/common/utils.py#L226
+# otherwise this test will fail because the proxy will die with an error.
+@pytest.mark.usefixtures("loop")
 async def test_secure_https_proxy_absolute_path(
-    client_ssl_ctx,
-    secure_proxy_url,
-    web_server_endpoint_url,
-    web_server_endpoint_payload,
+    client_ssl_ctx: ssl.SSLContext,
+    secure_proxy_url: URL,
+    web_server_endpoint_url: str,
+    web_server_endpoint_payload: str,
 ) -> None:
     """Ensure HTTP(S) sites are accessible through a secure proxy."""
     conn = aiohttp.TCPConnector()
     sess = aiohttp.ClientSession(connector=conn)
 
-    response = await sess.get(
+    async with sess.get(
         web_server_endpoint_url,
         proxy=secure_proxy_url,
         ssl=client_ssl_ctx,  # used for both proxy and endpoint connections
-    )
+    ) as response:
+        assert response.status == 200
+        assert await response.text() == web_server_endpoint_payload
 
-    assert response.status == 200
-    assert await response.text() == web_server_endpoint_payload
-
-    response.close()
     await sess.close()
     await conn.close()
+    await asyncio.sleep(0.1)
 
     # https://docs.aiohttp.org/en/v3.8.0/client_advanced.html#graceful-shutdown
     await asyncio.sleep(0.1)
 
 
-@secure_proxy_xfail_under_py310_linux(raises=AssertionError)
-@pytest.mark.xfail(
-    not PY_37,
-    raises=RuntimeError,
-    reason="`asyncio.loop.start_tls()` is only implemeneted in Python 3.7",
-)
 @pytest.mark.parametrize("web_server_endpoint_type", ("https",))
 @pytest.mark.usefixtures("loop")
+@pytest.mark.skipif(
+    ASYNCIO_SUPPORTS_TLS_IN_TLS, reason="asyncio on this python supports TLS in TLS"
+)
+@pytest.mark.filterwarnings(r"ignore:.*ssl.OP_NO_SSL*")
+# Filter out the warning from
+# https://github.com/abhinavsingh/proxy.py/blob/30574fd0414005dfa8792a6e797023e862bdcf43/proxy/common/utils.py#L226
+# otherwise this test will fail because the proxy will die with an error.
 async def test_https_proxy_unsupported_tls_in_tls(
-    client_ssl_ctx,
-    secure_proxy_url,
-    web_server_endpoint_type,
+    client_ssl_ctx: ssl.SSLContext,
+    secure_proxy_url: URL,
+    web_server_endpoint_type: str,
 ) -> None:
     """Ensure connecting to TLS endpoints w/ HTTPS proxy needs patching.
 
@@ -203,10 +157,10 @@ async def test_https_proxy_unsupported_tls_in_tls(
         r"^"
         r"An HTTPS request is being sent through an HTTPS proxy\. "
         "This support for TLS in TLS is known to be disabled "
-        r"in the stdlib asyncio\. This is why you'll probably see "
+        r"in the stdlib asyncio \(Python <3\.11\)\. This is why you'll probably see "
         r"an error in the log below\.\n\n"
-        "It is possible to enable it via monkeypatching under "
-        r"Python 3\.7 or higher\. For more details, see:\n"
+        r"It is possible to enable it via monkeypatching\. "
+        r"For more details, see:\n"
         r"\* https://bugs\.python\.org/issue37179\n"
         r"\* https://github\.com/python/cpython/pull/28073\n\n"
         r"You can temporarily patch this as follows:\n"
@@ -226,60 +180,26 @@ async def test_https_proxy_unsupported_tls_in_tls(
         r"$"
     )
 
-    with pytest.warns(RuntimeWarning, match=expected_warning_text,), pytest.raises(
-        ClientConnectionError,
-        match=expected_exception_reason,
-    ) as conn_err:
-        await sess.get(url, proxy=secure_proxy_url, ssl=client_ssl_ctx)
+    with (
+        pytest.warns(
+            RuntimeWarning,
+            match=expected_warning_text,
+        ),
+        pytest.raises(
+            ClientConnectionError,
+            match=expected_exception_reason,
+        ) as conn_err,
+    ):
+        async with sess.get(url, proxy=secure_proxy_url, ssl=client_ssl_ctx):
+            pass
 
-    assert type(conn_err.value.__cause__) == TypeError
+    assert isinstance(conn_err.value.__cause__, TypeError)
     assert match_regex(f"^{type_err!s}$", str(conn_err.value.__cause__))
 
     await sess.close()
     await conn.close()
 
-
-@pytest.mark.skipif(
-    PY_37,
-    reason="This test checks an error we emit below Python 3.7",
-)
-@pytest.mark.usefixtures("loop")
-async def test_https_proxy_missing_start_tls() -> None:
-    """Ensure error is raised for TLS-in-TLS w/ no ``start_tls()``."""
-    conn = aiohttp.TCPConnector()
-    sess = aiohttp.ClientSession(connector=conn)
-
-    expected_exception_reason = (
-        r"^"
-        r"An HTTPS request is being sent through an HTTPS proxy\. "
-        "This needs support for TLS in TLS but it is not implemented "
-        r"in your runtime for the stdlib asyncio\.\n\n"
-        r"Please upgrade to Python 3\.7 or higher\. For more details, "
-        r"please see:\n"
-        r"\* https://bugs\.python\.org/issue37179\n"
-        r"\* https://github\.com/python/cpython/pull/28073\n"
-        r"\* https://docs\.aiohttp\.org/en/stable/client_advanced\.html#proxy-support\n"
-        r"\* https://github\.com/aio-libs/aiohttp/discussions/6044\n"
-        r"$"
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match=expected_exception_reason,
-    ) as runtime_err:
-        await sess.get("https://python.org", proxy="https://proxy")
-
-    await sess.close()
-    await conn.close()
-
-    assert type(runtime_err.value.__cause__) is AttributeError
-
-    selector_event_loop_type = "Windows" if IS_WINDOWS else "Unix"
-    attr_err = (
-        f"^'_{selector_event_loop_type}SelectorEventLoop' object "
-        "has no attribute 'start_tls'$"
-    )
-    assert match_regex(attr_err, str(runtime_err.value.__cause__))
+    await asyncio.sleep(0.1)
 
 
 @pytest.fixture
@@ -333,13 +253,11 @@ def proxy_test_server(aiohttp_raw_server, loop, monkeypatch):
 def get_request(loop):
     async def _request(method="GET", *, url, trust_env=False, **kwargs):
         connector = aiohttp.TCPConnector(ssl=False, loop=loop)
-        client = aiohttp.ClientSession(connector=connector, trust_env=trust_env)
-        try:
-            resp = await client.request(method, url, **kwargs)
-            await resp.release()
-            return resp
-        finally:
-            await client.close()
+        async with aiohttp.ClientSession(
+            connector=connector, trust_env=trust_env
+        ) as client:
+            async with client.request(method, url, **kwargs) as resp:
+                return resp
 
     return _request
 
@@ -459,7 +377,8 @@ async def test_proxy_http_acquired_cleanup(proxy_test_server, loop) -> None:
 
     assert 0 == len(conn._acquired)
 
-    resp = await sess.get(url, proxy=proxy.url)
+    async with sess.get(url, proxy=proxy.url) as resp:
+        pass
     assert resp.closed
 
     assert 0 == len(conn._acquired)
@@ -478,11 +397,8 @@ async def test_proxy_http_acquired_cleanup_force(proxy_test_server, loop) -> Non
     assert 0 == len(conn._acquired)
 
     async def request():
-        resp = await sess.get(url, proxy=proxy.url)
-
-        assert 1 == len(conn._acquired)
-
-        await resp.release()
+        async with sess.get(url, proxy=proxy.url):
+            assert 1 == len(conn._acquired)
 
     await request()
 
@@ -506,13 +422,11 @@ async def test_proxy_http_multi_conn_limit(proxy_test_server, loop) -> None:
         # process requests only one by one
         nonlocal current_pid
 
-        resp = await sess.get(url, proxy=proxy.url)
+        async with sess.get(url, proxy=proxy.url) as resp:
+            current_pid = pid
+            await asyncio.sleep(0.2, loop=loop)
+            assert current_pid == pid
 
-        current_pid = pid
-        await asyncio.sleep(0.2, loop=loop)
-        assert current_pid == pid
-
-        await resp.release()
         return resp
 
     requests = [request(pid) for pid in range(multi_conn_num)]
@@ -563,9 +477,8 @@ async def xtest_proxy_https_send_body(proxy_test_server, loop):
     proxy.return_value = {"status": 200, "body": b"1" * (2**20)}
     url = "https://www.google.com.ua/search?q=aiohttp proxy"
 
-    resp = await sess.get(url, proxy=proxy.url)
-    body = await resp.read()
-    await resp.release()
+    async with sess.get(url, proxy=proxy.url) as resp:
+        body = await resp.read()
     await sess.close()
 
     assert body == b"1" * (2**20)
@@ -659,11 +572,8 @@ async def xtest_proxy_https_acquired_cleanup(proxy_test_server, loop):
     assert 0 == len(conn._acquired)
 
     async def request():
-        resp = await sess.get(url, proxy=proxy.url)
-
-        assert 1 == len(conn._acquired)
-
-        await resp.release()
+        async with sess.get(url, proxy=proxy.url):
+            assert 1 == len(conn._acquired)
 
     await request()
 
@@ -683,11 +593,8 @@ async def xtest_proxy_https_acquired_cleanup_force(proxy_test_server, loop):
     assert 0 == len(conn._acquired)
 
     async def request():
-        resp = await sess.get(url, proxy=proxy.url)
-
-        assert 1 == len(conn._acquired)
-
-        await resp.release()
+        async with sess.get(url, proxy=proxy.url):
+            assert 1 == len(conn._acquired)
 
     await request()
 
@@ -711,13 +618,11 @@ async def xtest_proxy_https_multi_conn_limit(proxy_test_server, loop):
         # process requests only one by one
         nonlocal current_pid
 
-        resp = await sess.get(url, proxy=proxy.url)
+        async with sess.get(url, proxy=proxy.url) as resp:
+            current_pid = pid
+            await asyncio.sleep(0.2, loop=loop)
+            assert current_pid == pid
 
-        current_pid = pid
-        await asyncio.sleep(0.2, loop=loop)
-        assert current_pid == pid
-
-        await resp.release()
         return resp
 
     requests = [request(pid) for pid in range(multi_conn_num)]
@@ -797,17 +702,17 @@ async def test_proxy_from_env_http_with_auth(proxy_test_server, get_request, moc
 
 
 async def test_proxy_from_env_http_with_auth_from_netrc(
-    proxy_test_server, get_request, tmpdir, mocker
+    proxy_test_server, get_request, tmp_path, mocker
 ):
     url = "http://aiohttp.io/path"
     proxy = await proxy_test_server()
     auth = aiohttp.BasicAuth("user", "pass")
-    netrc_file = tmpdir.join("test_netrc")
+    netrc_file = tmp_path / "test_netrc"
     netrc_file_data = "machine 127.0.0.1 login {} password {}".format(
         auth.login,
         auth.password,
     )
-    with open(str(netrc_file), "w") as f:
+    with netrc_file.open("w") as f:
         f.write(netrc_file_data)
     mocker.patch.dict(
         os.environ, {"http_proxy": str(proxy.url), "NETRC": str(netrc_file)}
@@ -823,17 +728,17 @@ async def test_proxy_from_env_http_with_auth_from_netrc(
 
 
 async def test_proxy_from_env_http_without_auth_from_netrc(
-    proxy_test_server, get_request, tmpdir, mocker
+    proxy_test_server, get_request, tmp_path, mocker
 ):
     url = "http://aiohttp.io/path"
     proxy = await proxy_test_server()
     auth = aiohttp.BasicAuth("user", "pass")
-    netrc_file = tmpdir.join("test_netrc")
+    netrc_file = tmp_path / "test_netrc"
     netrc_file_data = "machine 127.0.0.2 login {} password {}".format(
         auth.login,
         auth.password,
     )
-    with open(str(netrc_file), "w") as f:
+    with netrc_file.open("w") as f:
         f.write(netrc_file_data)
     mocker.patch.dict(
         os.environ, {"http_proxy": str(proxy.url), "NETRC": str(netrc_file)}
@@ -849,14 +754,14 @@ async def test_proxy_from_env_http_without_auth_from_netrc(
 
 
 async def test_proxy_from_env_http_without_auth_from_wrong_netrc(
-    proxy_test_server, get_request, tmpdir, mocker
+    proxy_test_server, get_request, tmp_path, mocker
 ):
     url = "http://aiohttp.io/path"
     proxy = await proxy_test_server()
     auth = aiohttp.BasicAuth("user", "pass")
-    netrc_file = tmpdir.join("test_netrc")
+    netrc_file = tmp_path / "test_netrc"
     invalid_data = f"machine 127.0.0.1 {auth.login} pass {auth.password}"
-    with open(str(netrc_file), "w") as f:
+    with netrc_file.open("w") as f:
         f.write(invalid_data)
 
     mocker.patch.dict(
@@ -923,8 +828,9 @@ async def test_proxy_auth() -> None:
         with pytest.raises(
             ValueError, match=r"proxy_auth must be None or BasicAuth\(\) tuple"
         ):
-            await session.get(
+            async with session.get(
                 "http://python.org",
                 proxy="http://proxy.example.com",
                 proxy_auth=("user", "pass"),
-            )
+            ):
+                pass

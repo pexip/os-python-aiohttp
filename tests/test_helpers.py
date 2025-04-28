@@ -2,9 +2,10 @@ import asyncio
 import base64
 import datetime
 import gc
-import platform
-import tempfile
-from math import isclose, modf
+import sys
+import weakref
+from math import ceil, modf
+from pathlib import Path
 from unittest import mock
 from urllib.request import getproxies_environment
 
@@ -13,10 +14,12 @@ from multidict import MultiDict
 from yarl import URL
 
 from aiohttp import helpers
-from aiohttp.helpers import parse_http_date
-
-IS_PYPY = platform.python_implementation() == "PyPy"
-
+from aiohttp.helpers import (
+    EMPTY_BODY_METHODS,
+    must_be_empty_body,
+    parse_http_date,
+    should_remove_content_length,
+)
 
 # ------------------- parse_mimetype ----------------------------------
 
@@ -65,9 +68,19 @@ def test_parse_mimetype(mimetype, expected) -> None:
 # ------------------- guess_filename ----------------------------------
 
 
-def test_guess_filename_with_tempfile() -> None:
-    with tempfile.TemporaryFile() as fp:
+def test_guess_filename_with_file_object(tmp_path) -> None:
+    file_path = tmp_path / "test_guess_filename"
+    with file_path.open("w+b") as fp:
         assert helpers.guess_filename(fp, "no-throw") is not None
+
+
+def test_guess_filename_with_path(tmp_path) -> None:
+    file_path = tmp_path / "test_guess_filename"
+    assert helpers.guess_filename(file_path, "no-throw") is not None
+
+
+def test_guess_filename_with_default() -> None:
+    assert helpers.guess_filename(None, "no-throw") == "no-throw"
 
 
 # ------------------- BasicAuth -----------------------------------
@@ -172,63 +185,23 @@ def test_basic_auth_from_url() -> None:
     assert auth.password == "pass"
 
 
+def test_basic_auth_no_user_from_url() -> None:
+    url = URL("http://:pass@example.com")
+    auth = helpers.BasicAuth.from_url(url)
+    assert auth is not None
+    assert auth.login == ""
+    assert auth.password == "pass"
+
+
+def test_basic_auth_no_auth_from_url() -> None:
+    url = URL("http://example.com")
+    auth = helpers.BasicAuth.from_url(url)
+    assert auth is None
+
+
 def test_basic_auth_from_not_url() -> None:
     with pytest.raises(TypeError):
         helpers.BasicAuth.from_url("http://user:pass@example.com")
-
-
-class ReifyMixin:
-
-    reify = NotImplemented
-
-    def test_reify(self) -> None:
-        class A:
-            def __init__(self):
-                self._cache = {}
-
-            @self.reify
-            def prop(self):
-                return 1
-
-        a = A()
-        assert 1 == a.prop
-
-    def test_reify_class(self) -> None:
-        class A:
-            def __init__(self):
-                self._cache = {}
-
-            @self.reify
-            def prop(self):
-                """Docstring."""
-                return 1
-
-        assert isinstance(A.prop, self.reify)
-        assert "Docstring." == A.prop.__doc__
-
-    def test_reify_assignment(self) -> None:
-        class A:
-            def __init__(self):
-                self._cache = {}
-
-            @self.reify
-            def prop(self):
-                return 1
-
-        a = A()
-
-        with pytest.raises(AttributeError):
-            a.prop = 123
-
-
-class TestPyReify(ReifyMixin):
-    reify = helpers.reify_py
-
-
-if not helpers.NO_EXTENSIONS and not IS_PYPY and hasattr(helpers, "reify_c"):
-
-    class TestCReify(ReifyMixin):
-        reify = helpers.reify_c
 
 
 # ----------------------------------- is_ip_address() ----------------------
@@ -243,32 +216,6 @@ def test_is_ip_address() -> None:
     assert not helpers.is_ip_address("localhost")
     assert not helpers.is_ip_address("www.example.com")
 
-    # Out of range
-    assert not helpers.is_ip_address("999.999.999.999")
-    # Contain a port
-    assert not helpers.is_ip_address("127.0.0.1:80")
-    assert not helpers.is_ip_address("[2001:db8:0:1]:80")
-    # Too many "::"
-    assert not helpers.is_ip_address("1200::AB00:1234::2552:7777:1313")
-
-
-def test_is_ip_address_bytes() -> None:
-    assert helpers.is_ip_address(b"127.0.0.1")
-    assert helpers.is_ip_address(b"::1")
-    assert helpers.is_ip_address(b"FE80:0000:0000:0000:0202:B3FF:FE1E:8329")
-
-    # Hostnames
-    assert not helpers.is_ip_address(b"localhost")
-    assert not helpers.is_ip_address(b"www.example.com")
-
-    # Out of range
-    assert not helpers.is_ip_address(b"999.999.999.999")
-    # Contain a port
-    assert not helpers.is_ip_address(b"127.0.0.1:80")
-    assert not helpers.is_ip_address(b"[2001:db8:0:1]:80")
-    # Too many "::"
-    assert not helpers.is_ip_address(b"1200::AB00:1234::2552:7777:1313")
-
 
 def test_ipv4_addresses() -> None:
     ip_addresses = [
@@ -277,8 +224,6 @@ def test_ipv4_addresses() -> None:
         "255.255.255.255",
     ]
     for address in ip_addresses:
-        assert helpers.is_ipv4_address(address)
-        assert not helpers.is_ipv6_address(address)
         assert helpers.is_ip_address(address)
 
 
@@ -294,14 +239,13 @@ def test_ipv6_addresses() -> None:
         "1::1",
     ]
     for address in ip_addresses:
-        assert not helpers.is_ipv4_address(address)
-        assert helpers.is_ipv6_address(address)
         assert helpers.is_ip_address(address)
 
 
 def test_host_addresses() -> None:
     hosts = [
-        "www.four.part.host" "www.python.org",
+        "www.four.part.host",
+        "www.python.org",
         "foo.bar",
         "localhost",
     ]
@@ -338,7 +282,19 @@ def test_when_timeout_smaller_second(loop) -> None:
     handle.close()
 
     assert isinstance(when, float)
-    assert isclose(when - timer, 0, abs_tol=0.001)
+    assert when - timer == pytest.approx(0, abs=0.001)
+
+
+def test_when_timeout_smaller_second_with_low_threshold(loop) -> None:
+    timeout = 0.1
+    timer = loop.time() + timeout
+
+    handle = helpers.TimeoutHandle(loop, timeout, 0.01)
+    when = handle.start()._when
+    handle.close()
+
+    assert isinstance(when, int)
+    assert when == ceil(timer)
 
 
 def test_timeout_handle_cb_exc(loop) -> None:
@@ -362,13 +318,63 @@ def test_timer_context_not_cancelled() -> None:
             with ctx:
                 pass
 
-        if helpers.PY_37:
-            assert not m_asyncio.current_task.return_value.cancel.called
-        else:
-            assert not m_asyncio.Task.current_task.return_value.cancel.called
+        assert not m_asyncio.current_task.return_value.cancel.called
 
 
-def test_timer_context_no_task(loop) -> None:
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Python 3.11+ is required for .cancelling()"
+)
+async def test_timer_context_timeout_does_not_leak_upward() -> None:
+    """Verify that the TimerContext does not leak cancellation outside the context manager."""
+    loop = asyncio.get_running_loop()
+    ctx = helpers.TimerContext(loop)
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    with pytest.raises(asyncio.TimeoutError):
+        with ctx:
+            assert current_task.cancelling() == 0
+            loop.call_soon(ctx.timeout)
+            await asyncio.sleep(1)
+
+    # After the context manager exits, the task should no longer be cancelling
+    assert current_task.cancelling() == 0
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Python 3.11+ is required for .cancelling()"
+)
+async def test_timer_context_timeout_does_swallow_cancellation() -> None:
+    """Verify that the TimerContext does not swallow cancellation."""
+    loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    ctx = helpers.TimerContext(loop)
+
+    async def task_with_timeout() -> None:
+        new_task = asyncio.current_task()
+        assert new_task is not None
+        with pytest.raises(asyncio.TimeoutError):
+            with ctx:
+                assert new_task.cancelling() == 0
+                await asyncio.sleep(1)
+
+    task = asyncio.create_task(task_with_timeout())
+    await asyncio.sleep(0)
+    task.cancel()
+    assert task.cancelling() == 1
+    ctx.timeout()
+
+    # Cancellation should not leak into the current task
+    assert current_task.cancelling() == 0
+    # Cancellation should not be swallowed if the task is cancelled
+    # and it also times out
+    await asyncio.sleep(0)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 1
+
+
+def test_timer_context_no_task(loop: asyncio.AbstractEventLoop) -> None:
     with pytest.raises(RuntimeError):
         with helpers.TimerContext(loop):
             pass
@@ -384,6 +390,16 @@ async def test_weakref_handle(loop) -> None:
     assert cb.test.called
 
 
+async def test_weakref_handle_with_small_threshold(loop) -> None:
+    cb = mock.Mock()
+    loop = mock.Mock()
+    loop.time.return_value = 10
+    helpers.weakref_handle(cb, "test", 0.1, loop, 0.01)
+    loop.call_at.assert_called_with(
+        11, helpers._weakref_handle, (weakref.ref(cb), "test")
+    )
+
+
 async def test_weakref_handle_weak(loop) -> None:
     cb = mock.Mock()
     helpers.weakref_handle(cb, "test", 0.01, loop)
@@ -394,22 +410,65 @@ async def test_weakref_handle_weak(loop) -> None:
 
 async def test_ceil_timeout() -> None:
     async with helpers.ceil_timeout(None) as timeout:
-        assert timeout.deadline is None
+        if sys.version_info >= (3, 11):
+            assert timeout.when() is None
+        else:
+            assert timeout.deadline is None
 
 
 async def test_ceil_timeout_round() -> None:
     async with helpers.ceil_timeout(7.5) as cm:
-        assert cm.deadline is not None
-        frac, integer = modf(cm.deadline)
+        if sys.version_info >= (3, 11):
+            assert cm.when() is not None
+            frac, integer = modf(cm.when())
+        else:
+            assert cm.deadline is not None
+            frac, integer = modf(cm.deadline)
         assert frac == 0
 
 
 async def test_ceil_timeout_small() -> None:
     async with helpers.ceil_timeout(1.1) as cm:
-        assert cm.deadline is not None
-        frac, integer = modf(cm.deadline)
+        if sys.version_info >= (3, 11):
+            assert cm.when() is not None
+            frac, integer = modf(cm.when())
+        else:
+            assert cm.deadline is not None
+            frac, integer = modf(cm.deadline)
         # a chance for exact integer with zero fraction is negligible
         assert frac != 0
+
+
+def test_ceil_call_later_with_small_threshold() -> None:
+    cb = mock.Mock()
+    loop = mock.Mock()
+    loop.time.return_value = 10.1
+    helpers.call_later(cb, 4.5, loop, 1)
+    loop.call_at.assert_called_with(15, cb)
+
+
+def test_ceil_call_later_no_timeout() -> None:
+    cb = mock.Mock()
+    loop = mock.Mock()
+    helpers.call_later(cb, 0, loop)
+    assert not loop.call_at.called
+
+
+async def test_ceil_timeout_none(loop) -> None:
+    async with helpers.ceil_timeout(None) as cm:
+        if sys.version_info >= (3, 11):
+            assert cm.when() is None
+        else:
+            assert cm.deadline is None
+
+
+async def test_ceil_timeout_small_with_overriden_threshold(loop) -> None:
+    async with helpers.ceil_timeout(1.5, ceil_threshold=1) as cm:
+        if sys.version_info >= (3, 11):
+            frac, integer = modf(cm.when())
+        else:
+            frac, integer = modf(cm.deadline)
+        assert frac == 0
 
 
 # -------------------------------- ContentDisposition -------------------
@@ -527,18 +586,6 @@ def test_proxies_from_env_http_with_auth(url_input, expected_scheme) -> None:
     assert proxy_auth.login == "user"
     assert proxy_auth.password == "pass"
     assert proxy_auth.encoding == "latin1"
-
-
-# ------------ get_running_loop ---------------------------------
-
-
-def test_get_running_loop_not_running(loop) -> None:
-    with pytest.warns(DeprecationWarning):
-        helpers.get_running_loop()
-
-
-async def test_get_running_loop_ok(loop) -> None:
-    assert helpers.get_running_loop() is loop
 
 
 # --------------------- get_env_proxy_for_url ------------------------------
@@ -669,7 +716,6 @@ async def test_set_exception_cancelled(loop) -> None:
 
 
 class TestChainMapProxy:
-    @pytest.mark.skipif(not helpers.PY_36, reason="Requires Python 3.6+")
     def test_inheritance(self) -> None:
         with pytest.raises(TypeError):
 
@@ -763,3 +809,124 @@ class TestChainMapProxy:
 )
 def test_parse_http_date(value, expected):
     assert parse_http_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    ["netrc_contents", "expected_username"],
+    [
+        (
+            "machine example.com login username password pass\n",
+            "username",
+        ),
+    ],
+    indirect=("netrc_contents",),
+)
+@pytest.mark.usefixtures("netrc_contents")
+def test_netrc_from_env(expected_username: str):
+    """Test that reading netrc files from env works as expected"""
+    netrc_obj = helpers.netrc_from_env()
+    assert netrc_obj.authenticators("example.com")[0] == expected_username
+
+
+@pytest.fixture
+def protected_dir(tmp_path: Path):
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+    try:
+        protected_dir.chmod(0o600)
+        yield protected_dir
+    finally:
+        protected_dir.rmdir()
+
+
+def test_netrc_from_home_does_not_raise_if_access_denied(
+    protected_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(Path, "home", lambda: protected_dir)
+    monkeypatch.delenv("NETRC", raising=False)
+
+    helpers.netrc_from_env()
+
+
+@pytest.mark.parametrize(
+    ["netrc_contents", "expected_auth"],
+    [
+        (
+            "machine example.com login username password pass\n",
+            helpers.BasicAuth("username", "pass"),
+        ),
+        (
+            "machine example.com account username password pass\n",
+            helpers.BasicAuth("username", "pass"),
+        ),
+        (
+            "machine example.com password pass\n",
+            helpers.BasicAuth("", "pass"),
+        ),
+    ],
+    indirect=("netrc_contents",),
+)
+@pytest.mark.usefixtures("netrc_contents")
+def test_basicauth_present_in_netrc(
+    expected_auth: helpers.BasicAuth,
+):
+    """Test that netrc file contents are properly parsed into BasicAuth tuples"""
+    netrc_obj = helpers.netrc_from_env()
+
+    assert expected_auth == helpers.basicauth_from_netrc(netrc_obj, "example.com")
+
+
+@pytest.mark.parametrize(
+    ["netrc_contents"],
+    [
+        ("",),
+    ],
+    indirect=("netrc_contents",),
+)
+@pytest.mark.usefixtures("netrc_contents")
+def test_read_basicauth_from_empty_netrc():
+    """Test that an error is raised if netrc doesn't have an entry for our host"""
+    netrc_obj = helpers.netrc_from_env()
+
+    with pytest.raises(
+        LookupError, match="No entry for example.com found in the `.netrc` file."
+    ):
+        helpers.basicauth_from_netrc(netrc_obj, "example.com")
+
+
+def test_method_must_be_empty_body():
+    """Test that HEAD is the only method that unequivocally must have an empty body."""
+    assert "HEAD" in EMPTY_BODY_METHODS
+    # CONNECT is only empty on a successful response
+    assert "CONNECT" not in EMPTY_BODY_METHODS
+
+
+def test_should_remove_content_length_is_subset_of_must_be_empty_body():
+    """Test should_remove_content_length is always a subset of must_be_empty_body."""
+    assert should_remove_content_length("GET", 101) is True
+    assert must_be_empty_body("GET", 101) is True
+
+    assert should_remove_content_length("GET", 102) is True
+    assert must_be_empty_body("GET", 102) is True
+
+    assert should_remove_content_length("GET", 204) is True
+    assert must_be_empty_body("GET", 204) is True
+
+    assert should_remove_content_length("GET", 204) is True
+    assert must_be_empty_body("GET", 204) is True
+
+    assert should_remove_content_length("GET", 200) is False
+    assert must_be_empty_body("GET", 200) is False
+
+    assert should_remove_content_length("HEAD", 200) is False
+    assert must_be_empty_body("HEAD", 200) is True
+
+    # CONNECT is only empty on a successful response
+    assert should_remove_content_length("CONNECT", 200) is True
+    assert must_be_empty_body("CONNECT", 200) is True
+
+    assert should_remove_content_length("CONNECT", 201) is True
+    assert must_be_empty_body("CONNECT", 201) is True
+
+    assert should_remove_content_length("CONNECT", 300) is False
+    assert must_be_empty_body("CONNECT", 300) is False

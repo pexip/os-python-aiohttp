@@ -3,10 +3,11 @@ import contextlib
 import gc
 import io
 import json
-import sys
+from collections import deque
 from http.cookies import SimpleCookie
-from typing import Any, List
+from typing import Any, Awaitable, Callable, List
 from unittest import mock
+from uuid import uuid4
 
 import pytest
 from multidict import CIMultiDict, MultiDict
@@ -14,12 +15,16 @@ from re_assert import Matches
 from yarl import URL
 
 import aiohttp
-from aiohttp import client, hdrs, web
+from aiohttp import CookieJar, client, hdrs, web
 from aiohttp.client import ClientSession
+from aiohttp.client_proto import ResponseHandler
 from aiohttp.client_reqrep import ClientRequest
-from aiohttp.connector import BaseConnector, TCPConnector
-from aiohttp.helpers import DEBUG, PY_36
+from aiohttp.connector import BaseConnector, Connection, TCPConnector, UnixConnector
+from aiohttp.helpers import DEBUG
+from aiohttp.http import RawResponseMessage
+from aiohttp.pytest_plugin import AiohttpServer
 from aiohttp.test_utils import make_mocked_coro
+from aiohttp.tracing import Trace
 
 
 @pytest.fixture
@@ -29,7 +34,7 @@ def connector(loop):
 
     conn = loop.run_until_complete(make_conn())
     proto = mock.Mock()
-    conn._conns["a"] = [(proto, 123)]
+    conn._conns["a"] = deque([(proto, 123)])
     yield conn
     loop.run_until_complete(conn.close())
 
@@ -160,7 +165,6 @@ async def test_merge_headers_with_list_of_tuples_duplicated_names(
 
 
 def test_http_GET(session, params) -> None:
-    # Python 3.8 will auto use mock.AsyncMock, it has different behavior
     with mock.patch(
         "aiohttp.client.ClientSession._request", new_callable=mock.MagicMock
     ) as patched:
@@ -327,9 +331,6 @@ def test_connector_loop(loop) -> None:
         )
         another_loop.run_until_complete(connector.close())
 
-        # Cannot use `AsyncExitStack` as it's Python 3.7+:
-        another_loop.run_until_complete(connector.close())
-
 
 def test_detach(loop, session) -> None:
     conn = session.connector
@@ -476,7 +477,126 @@ async def test_close_conn_on_error(create_session) -> None:
         c.__del__()
 
 
-async def test_cookie_jar_usage(loop, aiohttp_client) -> None:
+@pytest.mark.parametrize("protocol", ["http", "https", "ws", "wss"])
+async def test_ws_connect_allowed_protocols(
+    create_session: Any,
+    create_mocked_conn: Any,
+    protocol: str,
+    ws_key: Any,
+    key_data: Any,
+) -> None:
+    resp = mock.create_autospec(aiohttp.ClientResponse)
+    resp.status = 101
+    resp.headers = {
+        hdrs.UPGRADE: "websocket",
+        hdrs.CONNECTION: "upgrade",
+        hdrs.SEC_WEBSOCKET_ACCEPT: ws_key,
+    }
+    resp.url = URL(f"{protocol}://example")
+    resp.cookies = SimpleCookie()
+    resp.start = mock.AsyncMock()
+
+    req = mock.create_autospec(aiohttp.ClientRequest, spec_set=True)
+    req_factory = mock.Mock(return_value=req)
+    req.send = mock.AsyncMock(return_value=resp)
+    # BaseConnector allows all high level protocols by default
+    connector = BaseConnector()
+
+    session = await create_session(connector=connector, request_class=req_factory)
+
+    connections = []
+    original_connect = session._connector.connect
+
+    async def connect(req, traces, timeout):
+        conn = await original_connect(req, traces, timeout)
+        connections.append(conn)
+        return conn
+
+    async def create_connection(req, traces, timeout):
+        return create_mocked_conn()
+
+    connector = session._connector
+    with (
+        mock.patch.object(connector, "connect", connect),
+        mock.patch.object(connector, "_create_connection", create_connection),
+        mock.patch.object(connector, "_release"),
+        mock.patch("aiohttp.client.os") as m_os,
+    ):
+        m_os.urandom.return_value = key_data
+        await session.ws_connect(f"{protocol}://example")
+
+    # normally called during garbage collection.  triggers an exception
+    # if the connection wasn't already closed
+    for c in connections:
+        c.close()
+        c.__del__()
+
+    await session.close()
+
+
+@pytest.mark.parametrize("protocol", ["http", "https", "ws", "wss", "unix"])
+async def test_ws_connect_unix_socket_allowed_protocols(
+    create_session: Callable[..., Awaitable[ClientSession]],
+    create_mocked_conn: Callable[[], ResponseHandler],
+    protocol: str,
+    ws_key: bytes,
+    key_data: bytes,
+) -> None:
+    resp = mock.create_autospec(aiohttp.ClientResponse)
+    resp.status = 101
+    resp.headers = {
+        hdrs.UPGRADE: "websocket",
+        hdrs.CONNECTION: "upgrade",
+        hdrs.SEC_WEBSOCKET_ACCEPT: ws_key,
+    }
+    resp.url = URL(f"{protocol}://example")
+    resp.cookies = SimpleCookie()
+    resp.start = mock.AsyncMock()
+
+    req = mock.create_autospec(aiohttp.ClientRequest, spec_set=True)
+    req_factory = mock.Mock(return_value=req)
+    req.send = mock.AsyncMock(return_value=resp)
+    # UnixConnector allows all high level protocols by default and unix sockets
+    session = await create_session(
+        connector=UnixConnector(path=""), request_class=req_factory
+    )
+
+    connections = []
+    assert session._connector is not None
+    original_connect = session._connector.connect
+
+    async def connect(
+        req: ClientRequest, traces: List[Trace], timeout: aiohttp.ClientTimeout
+    ) -> Connection:
+        conn = await original_connect(req, traces, timeout)
+        connections.append(conn)
+        return conn
+
+    async def create_connection(
+        req: object, traces: object, timeout: object
+    ) -> ResponseHandler:
+        return create_mocked_conn()
+
+    connector = session._connector
+    with (
+        mock.patch.object(connector, "connect", connect),
+        mock.patch.object(connector, "_create_connection", create_connection),
+        mock.patch.object(connector, "_release"),
+        mock.patch("aiohttp.client.os") as m_os,
+    ):
+        m_os.urandom.return_value = key_data
+        await session.ws_connect(f"{protocol}://example")
+
+    # normally called during garbage collection.  triggers an exception
+    # if the connection wasn't already closed
+    for c in connections:
+        c.close()
+        c.__del__()
+
+    await session.close()
+
+
+async def test_cookie_jar_usage(loop: Any, aiohttp_client: Any) -> None:
     req_url = None
 
     jar = mock.Mock()
@@ -515,8 +635,24 @@ async def test_cookie_jar_usage(loop, aiohttp_client) -> None:
     assert resp_cookies["response"].value == "resp_value"
 
 
-async def test_session_default_version(loop) -> None:
-    session = aiohttp.ClientSession(loop=loop)
+async def test_cookies_with_not_quoted_cookie_jar(
+    aiohttp_server: AiohttpServer,
+) -> None:
+    async def handler(_: web.Request) -> web.Response:
+        return web.Response()
+
+    app = web.Application()
+    app.router.add_route("GET", "/", handler)
+    server = await aiohttp_server(app)
+    jar = CookieJar(quote_cookie=False)
+    cookies = {"name": "val=foobar"}
+    async with aiohttp.ClientSession(cookie_jar=jar) as sess:
+        resp = await sess.request("GET", server.make_url("/"), cookies=cookies)
+    assert resp.request_info.headers.get("Cookie", "") == "name=val=foobar"
+
+
+async def test_session_default_version(loop: asyncio.AbstractEventLoop) -> None:
+    session = aiohttp.ClientSession()
     assert session.version == aiohttp.HttpVersion11
     await session.close()
 
@@ -543,8 +679,57 @@ def test_proxy_str(session, params) -> None:
     ]
 
 
-async def test_request_tracing(loop, aiohttp_client) -> None:
-    async def handler(request):
+async def test_default_proxy(loop: asyncio.AbstractEventLoop) -> None:
+    proxy_url = URL("http://proxy.example.com")
+    proxy_auth = mock.Mock()
+    proxy_url2 = URL("http://proxy.example2.com")
+    proxy_auth2 = mock.Mock()
+
+    class OnCall(Exception):
+        pass
+
+    request_class_mock = mock.Mock(side_effect=OnCall())
+    session = ClientSession(
+        proxy=proxy_url, proxy_auth=proxy_auth, request_class=request_class_mock
+    )
+
+    assert session._default_proxy == proxy_url, "`ClientSession._default_proxy` not set"
+    assert (
+        session._default_proxy_auth == proxy_auth
+    ), "`ClientSession._default_proxy_auth` not set"
+
+    with pytest.raises(OnCall):
+        await session.get(
+            "http://example.com",
+        )
+
+    assert request_class_mock.called, "request class not called"
+    assert (
+        request_class_mock.call_args[1].get("proxy") == proxy_url
+    ), "`ClientSession._request` uses default proxy not one used in ClientSession.get"
+    assert (
+        request_class_mock.call_args[1].get("proxy_auth") == proxy_auth
+    ), "`ClientSession._request` uses default proxy_auth not one used in ClientSession.get"
+
+    request_class_mock.reset_mock()
+    with pytest.raises(OnCall):
+        await session.get(
+            "http://example.com", proxy=proxy_url2, proxy_auth=proxy_auth2
+        )
+
+    assert request_class_mock.called, "request class not called"
+    assert (
+        request_class_mock.call_args[1].get("proxy") == proxy_url2
+    ), "`ClientSession._request` uses default proxy not one used in ClientSession.get"
+    assert (
+        request_class_mock.call_args[1].get("proxy_auth") == proxy_auth2
+    ), "`ClientSession._request` uses default proxy_auth not one used in ClientSession.get"
+
+    await session.close()
+
+
+async def test_request_tracing(loop: asyncio.AbstractEventLoop, aiohttp_client) -> None:
+    async def handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
     app = web.Application()
@@ -670,7 +855,7 @@ async def test_request_tracing_url_params(loop: Any, aiohttp_client: Any) -> Non
             assert to_trace_urls(on_request_redirect) == []
             assert to_trace_urls(on_request_end) == [to_url("/?x=0")]
             assert to_trace_urls(on_request_exception) == []
-            assert to_trace_urls(on_request_chunk_sent) == [to_url("/?x=0")]
+            assert to_trace_urls(on_request_chunk_sent) == []
             assert to_trace_urls(on_response_chunk_received) == [to_url("/?x=0")]
             assert to_trace_urls(on_request_headers_sent) == [to_url("/?x=0")]
 
@@ -686,10 +871,7 @@ async def test_request_tracing_url_params(loop: Any, aiohttp_client: Any) -> Non
             assert to_trace_urls(on_request_redirect) == [to_url("/redirect?x=0")]
             assert to_trace_urls(on_request_end) == [to_url("/")]
             assert to_trace_urls(on_request_exception) == []
-            assert to_trace_urls(on_request_chunk_sent) == [
-                to_url("/redirect?x=0"),
-                to_url("/"),
-            ]
+            assert to_trace_urls(on_request_chunk_sent) == []
             assert to_trace_urls(on_response_chunk_received) == [to_url("/")]
             assert to_trace_urls(on_request_headers_sent) == [
                 to_url("/redirect?x=0"),
@@ -698,14 +880,7 @@ async def test_request_tracing_url_params(loop: Any, aiohttp_client: Any) -> Non
 
     # Exception
     with mock.patch("aiohttp.client.TCPConnector.connect") as connect_patched:
-        error = Exception()
-        if sys.version_info >= (3, 8, 1):
-            connect_patched.side_effect = error
-        else:
-            loop = asyncio.get_event_loop()
-            f = loop.create_future()
-            f.set_exception(error)
-            connect_patched.return_value = f
+        connect_patched.side_effect = Exception()
 
         for req in [
             lambda: session.get("/?x=0"),
@@ -734,13 +909,7 @@ async def test_request_tracing_exception() -> None:
 
     with mock.patch("aiohttp.client.TCPConnector.connect") as connect_patched:
         error = Exception()
-        if sys.version_info >= (3, 8, 1):
-            connect_patched.side_effect = error
-        else:
-            loop = asyncio.get_event_loop()
-            f = loop.create_future()
-            f.set_exception(error)
-            connect_patched.return_value = f
+        connect_patched.side_effect = error
 
         session = aiohttp.ClientSession(loop=loop, trace_configs=[trace_config])
 
@@ -789,7 +958,6 @@ async def test_request_tracing_interpose_headers(loop, aiohttp_client) -> None:
     assert MyClientRequest.headers["foo"] == "bar"
 
 
-@pytest.mark.skipif(not PY_36, reason="Python 3.6+ required")
 def test_client_session_inheritance() -> None:
     with pytest.warns(DeprecationWarning):
 
@@ -811,7 +979,9 @@ async def test_client_session_timeout_args(loop) -> None:
 
     with pytest.warns(DeprecationWarning):
         session2 = ClientSession(loop=loop, read_timeout=20 * 60, conn_timeout=30 * 60)
-    assert session2._timeout == client.ClientTimeout(total=20 * 60, connect=30 * 60)
+    assert session2._timeout == client.ClientTimeout(
+        total=20 * 60, connect=30 * 60, sock_connect=client.DEFAULT_TIMEOUT.sock_connect
+    )
 
     with pytest.raises(ValueError):
         ClientSession(
@@ -833,19 +1003,38 @@ async def test_client_session_timeout_default_args(loop) -> None:
     await session1.close()
 
 
-async def test_client_session_timeout_argument() -> None:
-    session = ClientSession(timeout=500)
-    assert session.timeout == 500
-    await session.close()
+async def test_client_session_timeout_zero(
+    create_mocked_conn: Callable[[], ResponseHandler]
+) -> None:
+    async def create_connection(
+        req: object, traces: object, timeout: object
+    ) -> ResponseHandler:
+        await asyncio.sleep(0.01)
+        conn = create_mocked_conn()
+        conn.connected = True  # type: ignore[misc]
+        assert conn.transport is not None
+        conn.transport.is_closing.return_value = False  # type: ignore[attr-defined]
+        msg = mock.create_autospec(RawResponseMessage, spec_set=True, code=200)
+        conn.read.return_value = (msg, mock.Mock())  # type: ignore[attr-defined]
+        return conn
 
-
-async def test_client_session_timeout_zero() -> None:
     timeout = client.ClientTimeout(total=10, connect=0, sock_connect=0, sock_read=0)
-    try:
-        async with ClientSession(timeout=timeout) as session:
-            await session.get("http://example.com")
-    except asyncio.TimeoutError:
-        pytest.fail("0 should disable timeout.")
+    async with ClientSession(timeout=timeout) as session:
+        with mock.patch.object(
+            session._connector, "_create_connection", create_connection
+        ):
+            try:
+                resp = await session.get("http://example.com")
+            except asyncio.TimeoutError:  # pragma: no cover
+                pytest.fail("0 should disable timeout.")
+            resp.close()
+
+
+async def test_client_session_timeout_bad_argument() -> None:
+    with pytest.raises(ValueError):
+        ClientSession(timeout="test_bad_argumnet")
+    with pytest.raises(ValueError):
+        ClientSession(timeout=100)
 
 
 async def test_requote_redirect_url_default() -> None:
@@ -896,6 +1085,24 @@ async def test_requote_redirect_setter() -> None:
             URL("http://example.com/test"),
             id="base_url=URL('http://example.com') url='/test'",
         ),
+        pytest.param(
+            URL("http://example.com/test1/"),
+            "test2",
+            URL("http://example.com/test1/test2"),
+            id="base_url=URL('http://example.com/test1/') url='test2'",
+        ),
+        pytest.param(
+            URL("http://example.com/test1/"),
+            "/test2",
+            URL("http://example.com/test2"),
+            id="base_url=URL('http://example.com/test1/') url='/test2'",
+        ),
+        pytest.param(
+            URL("http://example.com/test1/"),
+            "test2?q=foo#bar",
+            URL("http://example.com/test1/test2?q=foo#bar"),
+            id="base_url=URL('http://example.com/test1/') url='test2?q=foo#bar'",
+        ),
     ],
 )
 async def test_build_url_returns_expected_url(
@@ -903,3 +1110,38 @@ async def test_build_url_returns_expected_url(
 ) -> None:
     session = await create_session(base_url)
     assert session._build_url(url) == expected_url
+
+
+async def test_base_url_without_trailing_slash() -> None:
+    with pytest.raises(ValueError, match="base_url must have a trailing '/'"):
+        ClientSession(base_url="http://example.com/test")
+
+
+async def test_instantiation_with_invalid_timeout_value(loop):
+    loop.set_debug(False)
+    logs = []
+    loop.set_exception_handler(lambda loop, ctx: logs.append(ctx))
+    with pytest.raises(ValueError, match="timeout parameter cannot be .*"):
+        ClientSession(timeout=1)
+    # should not have "Unclosed client session" warning
+    assert not logs
+
+
+@pytest.mark.parametrize(
+    ("outer_name", "inner_name"),
+    [
+        ("skip_auto_headers", "_skip_auto_headers"),
+        ("auth", "_default_auth"),
+        ("json_serialize", "_json_serialize"),
+        ("connector_owner", "_connector_owner"),
+        ("raise_for_status", "_raise_for_status"),
+        ("trust_env", "_trust_env"),
+        ("trace_configs", "_trace_configs"),
+    ],
+)
+async def test_properties(
+    session: ClientSession, outer_name: str, inner_name: str
+) -> None:
+    value = uuid4()
+    setattr(session, inner_name, value)
+    assert value == getattr(session, outer_name)
