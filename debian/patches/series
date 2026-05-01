@@ -3,3 +3,10 @@
 0004-remove-sphinxcontrib.towncrier-for-now.patch
 0005-avoid-aiohttp-theme.patch
 0006-use-local-documentation.patch
+CVE-2025-69223.patch
+CVE-2025-69224.patch
+CVE-2025-69225.patch
+CVE-2025-69226.patch
+CVE-2025-69227.patch
+CVE-2025-69228.patch
+CVE-2025-69229.patch
